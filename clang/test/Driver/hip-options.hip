@@ -32,6 +32,34 @@
 // BUFF: "-cc1" "-triple" "x86_64-unknown-linux-gnu"{{.*}} "-E" {{.*}}
 // BUFF: "-cc1" "-triple" "x86_64-unknown-linux-gnu"{{.*}}"-x" "ir"
 
+// Check new pass manager opt in options are passed to cc1.
+// RUN: %clang -### -nogpulib -nogpuinc --target=x86_64-unknown-linux-gnu -fenable-new-pm-codegen  %s 2>&1 | FileCheck -check-prefix=NPM %s
+// RUN: %clang -### -nogpulib -nogpuinc --target=x86_64-unknown-linux-gnu  %s 2>&1 | FileCheck -check-prefix=NPM %s
+// NPM: "-cc1"{{.*}} "-triple" "amdgcn-amd-amdhsa" {{.*}} "-fenable-new-pm-codegen"
+
+// Check that the option reaches the device cc1 when clang runs the backend directly
+// instead of the default lld/LTO path.
+// RUN: %clang -### -nogpulib -nogpuinc --target=x86_64-unknown-linux-gnu --offload-arch=gfx900 --cuda-device-only -c %s 2>&1 | FileCheck -check-prefix=NPM_BACKEND %s
+// NPM_BACKEND: "-cc1"{{.*}} "-triple" "amdgcn-amd-amdhsa"{{.*}} "-fenable-new-pm-codegen"{{.*}} "-emit-obj"
+
+// Check we do not opt in NPM when its explicitly disabled.
+// RUN: %clang -### -nogpulib -nogpuinc --target=x86_64-unknown-linux-gnu -fno-enable-new-pm-codegen  %s 2>&1 | FileCheck -check-prefix=NPM_NEG %s
+// NPM_NEG-NOT: "-cc1"{{.*}} "-triple" "amdgcn-amd-amdhsa" {{.*}} "-fenable-new-pm-codegen"
+
+// Check that disable NPM when GIsel is selected.
+// RUN: %clang -### -nogpulib -nogpuinc --target=x86_64-unknown-linux-gnu -fglobal-isel %s 2>&1 | FileCheck -check-prefix=NPM_GISEL %s
+// NPM_GISEL-NOT: "-cc1"{{.*}} "-triple" "amdgcn-amd-amdhsa" {{.*}} "-fenable-new-pm-codegen"
+
+// Check that NPM enablement is forwarded to the device linker for full offload LTO.
+// RUN: %clang -### -nogpulib -nogpuinc --target=x86_64-unknown-linux-gnu -foffload-lto=full %s 2>&1 | FileCheck -check-prefix=NPM_LTO %s
+// NPM_LTO: "--device-compiler=amdgcn-amd-amdhsa=-flto=full"
+// NPM_LTO-SAME: "--device-linker=amdgcn-amd-amdhsa=-plugin-opt=-enable-npm-for-backend"
+
+// Check that NPM is not enabled for the LTO backend with -fno-enable-new-pm-codegen or GIsel.
+// RUN: %clang -### -nogpulib -nogpuinc --target=x86_64-unknown-linux-gnu -foffload-lto=full -fno-enable-new-pm-codegen %s 2>&1 | FileCheck -check-prefix=NPM_LTO_NEG %s
+// RUN: %clang -### -nogpulib -nogpuinc --target=x86_64-unknown-linux-gnu -foffload-lto=full -fglobal-isel %s 2>&1 | FileCheck -check-prefix=NPM_LTO_NEG %s
+// NPM_LTO_NEG-NOT: "-plugin-opt=-enable-npm-for-backend"
+
 // RUN: %clang -### -x hip -nogpulib -nogpuinc --target=x86_64-pc-windows-msvc -fms-extensions \
 // RUN:   -mllvm -amdgpu-early-inline-all=true  %s 2>&1 | \
 // RUN:   FileCheck -check-prefix=MLLVM %s
