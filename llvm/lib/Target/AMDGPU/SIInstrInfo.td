@@ -1247,6 +1247,7 @@ class SDWAOperand<string Id, string Name = NAME>
   let ParserMethod =
     "[this](OperandVector &Operands) -> ParseStatus { "#
     "return parseSDWASel(Operands, \""#Id#"\", AMDGPUOperand::"#ImmTy#"); }";
+  let DecoderMethod = "decodeSDWASel";
 }
 
 class ArrayOperand0<string Id, string Name = NAME>
@@ -1312,7 +1313,9 @@ def Dim : CustomOperand</*optional=*/1, type=i8>;
 def dst_sel : SDWAOperand<"dst_sel", "SDWADstSel">;
 def src0_sel : SDWAOperand<"src0_sel", "SDWASrc0Sel">;
 def src1_sel : SDWAOperand<"src1_sel", "SDWASrc1Sel">;
-def dst_unused : CustomOperand<1, "SDWADstUnused">;
+def dst_unused : CustomOperand<1, "SDWADstUnused"> {
+  let DecoderMethod = "decodeSDWADstUnused";
+}
 
 def op_sel0 : ArrayOperand0<"op_sel", "OpSel">;
 def op_sel_hi0 : ArrayOperand0<"op_sel_hi", "OpSelHi">;
