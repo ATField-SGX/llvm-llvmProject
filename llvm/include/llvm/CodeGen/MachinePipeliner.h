@@ -69,6 +69,10 @@ struct MachinePipelinerPolicy {
   /// Don't pipeline loops whose minimum initiation interval exceeds this.
   /// Overridden by -pipeliner-max-mii when that is passed.
   int MaxMII = 27;
+
+  /// Limit the register pressure of the scheduled loop, retrying at a higher
+  /// II when a schedule needs too many registers.
+  bool ShouldLimitRegPressure = false;
 };
 
 /// The main class in the implementation of the target independent

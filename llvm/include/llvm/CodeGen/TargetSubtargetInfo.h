@@ -280,6 +280,15 @@ public:
   /// Override generic software pipelining policy.
   virtual void overridePipelinerPolicy(MachinePipelinerPolicy &Policy) const {}
 
+  /// Given the per-pressure-set maxima \p MaxSetPressure of a candidate
+  /// pipeliner schedule for \p MF, return whether it uses too many registers,
+  /// or nullopt to defer to the pipeliner's generic per-set limit check. A
+  /// non-nullopt verdict takes precedence over that check (and its margin).
+  virtual std::optional<bool> isPipelinerScheduleRegPressureTooHigh(
+      const MachineFunction &MF, ArrayRef<unsigned> MaxSetPressure) const {
+    return std::nullopt;
+  }
+
   // Perform target-specific adjustments to the latency of a schedule
   // dependency.
   // If a pair of operands is associated with the schedule dependency, DefOpIdx

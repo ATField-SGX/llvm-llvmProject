@@ -1577,6 +1577,7 @@ struct FuncUnitSorter {
 /// Calculate the maximum register pressure of the scheduled instructions stream
 class HighRegisterPressureDetector {
   MachineBasicBlock *OrigMBB;
+  const MachineFunction &MF;
   const MachineRegisterInfo &MRI;
   const TargetRegisterInfo *TRI;
 
@@ -1876,7 +1877,7 @@ private:
 public:
   HighRegisterPressureDetector(MachineBasicBlock *OrigMBB,
                                const MachineFunction &MF)
-      : OrigMBB(OrigMBB), MRI(MF.getRegInfo()),
+      : OrigMBB(OrigMBB), MF(MF), MRI(MF.getRegInfo()),
         TRI(MF.getSubtarget().getRegisterInfo()),
         PSetNum(TRI->getNumRegPressureSets()), InitSetPressure(PSetNum, 0),
         PressureSetLimit(PSetNum, 0) {}
@@ -1895,7 +1896,8 @@ public:
   }
 
   // Calculate the maximum register pressures of the loop and check if they
-  // exceed the limit
+  // exceed the limit, or defer to the target's verdict via
+  // TargetSubtargetInfo::isPipelinerScheduleRegPressureTooHigh.
   bool detect(const SwingSchedulerDAG *SSD, SMSchedule &Schedule,
               const unsigned MaxStage) const {
     assert(0 <= RegPressureMargin && RegPressureMargin <= 100 &&
@@ -1914,6 +1916,17 @@ public:
       }
       dbgs() << '\n';
     });
+
+    const TargetSubtargetInfo &ST = MF.getSubtarget();
+    if (std::optional<bool> TooHigh =
+            ST.isPipelinerScheduleRegPressureTooHigh(MF, MaxSetPressure)) {
+      LLVM_DEBUG(dbgs() << (*TooHigh ? "Rejected the schedule because of too "
+                                       "high register pressure (per target "
+                                       "verdict)\n"
+                                     : "Accepted the schedule (per target "
+                                       "verdict)\n"));
+      return *TooHigh;
+    }
 
     for (unsigned PSet = 0; PSet < PSetNum; PSet++) {
       unsigned Limit = PressureSetLimit[PSet];
@@ -2789,6 +2802,8 @@ void SwingSchedulerDAG::initPolicy() {
   // After subtarget overrides, apply command line options.
   if (SwpMaxMii.getNumOccurrences())
     Policy.MaxMII = SwpMaxMii;
+  if (LimitRegPressure.getNumOccurrences())
+    Policy.ShouldLimitRegPressure = LimitRegPressure;
 }
 
 /// Process the nodes in the computed order and create the pipelined schedule
@@ -2802,7 +2817,7 @@ bool SwingSchedulerDAG::schedulePipeline(SMSchedule &Schedule) {
 
   bool scheduleFound = false;
   std::unique_ptr<HighRegisterPressureDetector> HRPDetector;
-  if (LimitRegPressure) {
+  if (Policy.ShouldLimitRegPressure) {
     HRPDetector =
         std::make_unique<HighRegisterPressureDetector>(Loop.getHeader(), MF);
     HRPDetector->init(RegClassInfo);
@@ -2886,9 +2901,9 @@ bool SwingSchedulerDAG::schedulePipeline(SMSchedule &Schedule) {
     if (scheduleFound)
       scheduleFound = Schedule.isValidSchedule(this);
 
-    // If a schedule was found and the option is enabled, check if the schedule
-    // might generate additional register spills/fills.
-    if (scheduleFound && LimitRegPressure)
+    // If a schedule was found and the detector is enabled, check if the
+    // schedule might generate additional register spills/fills.
+    if (scheduleFound && HRPDetector)
       scheduleFound =
           !HRPDetector->detect(this, Schedule, Schedule.getMaxStageCount());
   }
