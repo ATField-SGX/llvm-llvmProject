@@ -18,10 +18,12 @@
 #include "AMDGPURegisterBankInfo.h"
 #include "AMDGPUSelectionDAGInfo.h"
 #include "AMDGPUTargetMachine.h"
+#include "GCNRegPressure.h"
 #include "SIMachineFunctionInfo.h"
 #include "Utils/AMDGPUBaseInfo.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/CodeGen/GlobalISel/InlineAsmLowering.h"
+#include "llvm/CodeGen/MachinePipeliner.h"
 #include "llvm/CodeGen/MachineScheduler.h"
 #include "llvm/CodeGen/TargetFrameLowering.h"
 #include "llvm/IR/DiagnosticInfo.h"
@@ -448,6 +450,49 @@ void GCNSubtarget::overridePostRASchedPolicy(MachineSchedPolicy &Policy,
     dbgs() << "Post-MI-sched direction (" << F.getName() << "): " << DirStr
            << '\n';
   });
+}
+
+void GCNSubtarget::overridePipelinerPolicy(
+    MachinePipelinerPolicy &Policy) const {
+  // MFMA latencies push the MII of otherwise pipelineable loops past the
+  // generic limit.
+  Policy.MaxMII = 256;
+  Policy.ShouldLimitRegPressure = true;
+}
+
+// Reject a schedule needing more registers than the target occupancy allows.
+std::optional<bool> GCNSubtarget::isPipelinerScheduleRegPressureTooHigh(
+    const MachineFunction &MF, ArrayRef<unsigned> MaxSetPressure) const {
+  const SIMachineFunctionInfo *MFI = MF.getInfo<SIMachineFunctionInfo>();
+  unsigned TargetOcc = MFI->getOccupancy();
+
+  unsigned SGPRPressure = MaxSetPressure[AMDGPU::RegisterPressureSets::SReg_32];
+  unsigned MaxSGPRs = std::min(getMaxNumSGPRs(TargetOcc, /*Addressable=*/true),
+                               getMaxNumSGPRs(MF));
+  if (SGPRPressure > MaxSGPRs)
+    return true;
+
+  unsigned VGPRPressure = MaxSetPressure[AMDGPU::RegisterPressureSets::VGPR_32];
+  unsigned AGPRPressure = MaxSetPressure[AMDGPU::RegisterPressureSets::AGPR_32];
+
+  // The maximum number of arch VGPRs on a non-unified register file, or the
+  // maximum VGPR + AGPR in the unified (gfx90a+) register file case.
+  unsigned MaxVGPRs =
+      std::min(getMaxNumVGPRs(TargetOcc, MFI->getDynamicVGPRBlockSize()),
+               getMaxNumVGPRs(MF));
+  unsigned CombinedVGPRs =
+      hasGFX90AInsts()
+          ? GCNRegPressure::getUnifiedVGPRNum(VGPRPressure, AGPRPressure,
+                                              /*NumAVGPRs=*/0)
+          : std::max(VGPRPressure, AGPRPressure);
+  if (CombinedVGPRs > MaxVGPRs)
+    return true;
+
+  // The maximum number of arch VGPRs for both unified and non-unified
+  // register files. Each class must fit this cap, which is tighter than the
+  // combined budget at low occupancy.
+  unsigned MaxArchVGPRs = std::min(MaxVGPRs, getAddressableNumArchVGPRs());
+  return VGPRPressure > MaxArchVGPRs || AGPRPressure > MaxArchVGPRs;
 }
 
 void GCNSubtarget::mirFileLoaded(MachineFunction &MF) const {
