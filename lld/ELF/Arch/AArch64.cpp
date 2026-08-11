@@ -103,7 +103,7 @@ private:
   void relaxTlsGdToLe(uint8_t *loc, const Relocation &rel, uint64_t val) const;
   void relaxTlsGdToIe(uint8_t *loc, const Relocation &rel, uint64_t val) const;
   void relaxTlsIeToLe(uint8_t *loc, const Relocation &rel, uint64_t val) const;
-  void relaxAuthTlsDescForNonPreemptibleUndefWeak(uint8_t *loc,
+  void relaxAuthTlsDescForNonPreemptibleUndefined(uint8_t *loc,
                                                   const Relocation &rel) const;
 };
 
@@ -218,9 +218,9 @@ void AArch64::scanSectionImpl(InputSectionBase &sec, Relocs<RelTy> rels,
     auto handleTlsDescAuth = [&sym, &sec, type, offset,
                               addend](RelExpr tlsdescExpr) {
       sym.setFlags(NEEDS_TLSDESC_AUTH);
-      if (sym.isUndefWeak() && !sym.isPreemptible) {
+      if (sym.isUndefined() && !sym.isPreemptible) {
         // Resolves statically to null. Handle in
-        // relaxAuthTlsDescForNonPreemptibleUndefWeak
+        // relaxAuthTlsDescForNonPreemptibleUndefined
         sec.addReloc({R_TPREL, type, offset, addend, &sym});
       } else {
         sym.setFlags(NEEDS_TLSDESC);
@@ -387,7 +387,7 @@ void AArch64::scanSectionImpl(InputSectionBase &sec, Relocs<RelTy> rels,
       continue;
     case R_AARCH64_AUTH_TLSDESC_CALL:
       sym.setFlags(NEEDS_TLSDESC_AUTH);
-      if (sym.isUndefWeak() && !sym.isPreemptible)
+      if (sym.isUndefined() && !sym.isPreemptible)
         sec.addReloc({R_TPREL, type, offset, addend, &sym});
       continue;
 
@@ -850,7 +850,7 @@ void AArch64::relocate(uint8_t *loc, const Relocation &rel,
   }
 }
 
-void AArch64::relaxAuthTlsDescForNonPreemptibleUndefWeak(
+void AArch64::relaxAuthTlsDescForNonPreemptibleUndefined(
     uint8_t *loc, const Relocation &rel) const {
   // AUTH TLSDESC relocations are in the form:
   //   adrp x0, :tlsdesc_auth:v             [R_AARCH64_AUTH_TLSDESC_ADR_PAGE21]
@@ -1181,7 +1181,7 @@ void AArch64::relocateAlloc(InputSection &sec, uint8_t *buf) const {
     case R_AARCH64_AUTH_TLSDESC_ADD_LO12:
     case R_AARCH64_AUTH_TLSDESC_CALL:
       if (rel.expr == R_TPREL)
-        relaxAuthTlsDescForNonPreemptibleUndefWeak(loc, rel);
+        relaxAuthTlsDescForNonPreemptibleUndefined(loc, rel);
       else
         relocate(loc, rel, val);
       continue;
