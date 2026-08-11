@@ -1,24 +1,24 @@
-// RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -target-feature +avx -fclangir -clangir-enable-call-conv-lowering -emit-llvm %s -o %t-cir.ll
+// RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -target-feature +avx -fclangir -emit-llvm %s -o %t-cir.ll
 // RUN: FileCheck --check-prefixes=LINUX,LINUX-CIR --input-file=%t-cir.ll %s
 // RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -target-feature +avx -emit-llvm %s -o %t.ll
 // RUN: FileCheck --check-prefixes=LINUX,LINUX-OGCG --input-file=%t.ll %s
 
-// RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -target-feature +avx -fclang-abi-compat=3.8 -fclangir -clangir-enable-call-conv-lowering -emit-llvm %s -o %t-38-cir.ll
+// RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -target-feature +avx -fclang-abi-compat=3.8 -fclangir -emit-llvm %s -o %t-38-cir.ll
 // RUN: FileCheck --check-prefix=LINUX38 --input-file=%t-38-cir.ll %s
 // RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -target-feature +avx -fclang-abi-compat=3.8 -emit-llvm %s -o %t-38.ll
 // RUN: FileCheck --check-prefix=LINUX38 --input-file=%t-38.ll %s
 
-// RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -target-feature +avx -fclang-abi-compat=9 -fclangir -clangir-enable-call-conv-lowering -emit-llvm %s -o %t-9-cir.ll
+// RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -target-feature +avx -fclang-abi-compat=9 -fclangir -emit-llvm %s -o %t-9-cir.ll
 // RUN: FileCheck --check-prefix=LINUX9 --input-file=%t-9-cir.ll %s
 // RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -target-feature +avx -fclang-abi-compat=9 -emit-llvm %s -o %t-9.ll
 // RUN: FileCheck --check-prefix=LINUX9 --input-file=%t-9.ll %s
 
-// RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -target-feature +avx -fclang-abi-compat=11 -fclangir -clangir-enable-call-conv-lowering -emit-llvm %s -o %t-11-cir.ll
+// RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -target-feature +avx -fclang-abi-compat=11 -fclangir -emit-llvm %s -o %t-11-cir.ll
 // RUN: FileCheck --check-prefixes=LINUX11-CIR --input-file=%t-11-cir.ll %s
 // RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -target-feature +avx -fclang-abi-compat=11 -emit-llvm %s -o %t-11.ll
 // RUN: FileCheck --check-prefixes=LINUX11-OGCG --input-file=%t-11.ll %s
 
-// RUN: %clang_cc1 -triple x86_64-apple-darwin -target-feature +avx -fclangir -clangir-enable-call-conv-lowering -emit-llvm %s -o %t-darwin-cir.ll
+// RUN: %clang_cc1 -triple x86_64-apple-darwin -target-feature +avx -fclangir -emit-llvm %s -o %t-darwin-cir.ll
 // RUN: FileCheck --check-prefix=DARWIN --input-file=%t-darwin-cir.ll %s
 // RUN: %clang_cc1 -triple x86_64-apple-darwin -target-feature +avx -emit-llvm %s -o %t-darwin.ll
 // RUN: FileCheck --check-prefix=DARWIN --input-file=%t-darwin.ll %s
