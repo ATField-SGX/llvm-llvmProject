@@ -5788,6 +5788,15 @@ static void genOMP(lower::AbstractConverter &converter, lower::SymMap &symTable,
                    semantics::SemanticsContext &semaCtx,
                    lower::pft::Evaluation &eval,
                    const parser::OmpAllocateDirective &allocate) {
+  // The allocate directive is lowered as a runtime allocation with a matching
+  // deallocation registered as a cleanup at the exit of the enclosing function
+  // scope, which only works within a function. In the case of e.g. modules,
+  // there is no place in which to emit the deallocation cleanup when that stage
+  // is reached, crashing the compiler during teardown.
+  if (!converter.getFirOpBuilder().getFunction())
+    TODO(converter.genLocation(allocate.source),
+         "OpenMP ALLOCATE directive in non-function declaration scope");
+
   lower::StatementContext stmtCtx;
   ObjectList objects = makeObjects((allocate.BeginDir().Arguments()), semaCtx);
   const auto &clauseList = (allocate.BeginDir().Clauses());
