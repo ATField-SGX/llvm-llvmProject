@@ -430,10 +430,10 @@ int test_multi_param_highlight() {
 
   // CHECK: note: Value's lifetime bound to the lifetime of 'local_one' here
   // CHECK: return multi_params_annotated(&local_one, &local_two);
-  // CHECK-NEXT:                          ^~~~~~~~~~
+  // CHECK-NEXT: ^~~~~~~~~~
   // CHECK: note: Value's lifetime bound to the lifetime of 'local_two' here
   // CHECK: return multi_params_annotated(&local_one, &local_two);
-  // CHECK-NEXT:                                      ^~~~~~~~~~
+  // CHECK-NEXT: ^~~~~~~~~~
 }
 
 int test_multi_local_bound_to_param_highlight() {
@@ -452,14 +452,14 @@ int test_multi_local_bound_to_param_highlight() {
   
   // CHECK: note: Value's lifetime bound to the lifetime of 'j' here
   // CHECK-NEXT: int j = 4, k = 5;
-  // CHECK-NEXT:     ~
+  // CHECK-NEXT: ~
   // CHECK: note: Lifetime of 'j' ended here
   // CHECK-NEXT: int j = 4, k = 5;
-  // CHECK-NEXT:     ~
+  // CHECK-NEXT: ~
   // CHECK: note: Value's lifetime bound to the lifetime of 'k' here
   // CHECK-NEXT: int j = 4, k = 5;
-  // CHECK-NEXT:            ~
+  // CHECK-NEXT: ~
   // CHECK: note: Lifetime of 'k' ended here
   // CHECK-NEXT: int j = 4, k = 5;
-  // CHECK-NEXT:            ~
+  // CHECK-NEXT: ~
 }
