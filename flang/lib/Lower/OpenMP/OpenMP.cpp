@@ -3024,7 +3024,8 @@ static void genWsloopClauses(
 static mlir::omp::AllocateDirOp
 genAllocateDirOp(lower::AbstractConverter &converter, mlir::Location loc,
                  llvm::ArrayRef<mlir::Value> operandRange,
-                 const mlir::omp::AllocateDirOperands &clauseOps, bool genFree) {
+                 const mlir::omp::AllocateDirOperands &clauseOps,
+                 bool genFree) {
   auto allocDirOp = mlir::omp::AllocateDirOp::create(
       converter.getFirOpBuilder(), loc, operandRange, clauseOps.align,
       clauseOps.allocator);
@@ -5832,9 +5833,9 @@ static void genOMP(lower::AbstractConverter &converter, lower::SymMap &symTable,
   List<Clause> clauses = makeClauses(clauseList, semaCtx);
   mlir::Location loc = converter.genLocation(allocate.source);
 
-  ConstructQueue queue{buildConstructQueue(
-      builder.getModule(), semaCtx, eval, allocate.source,
-      llvm::omp::Directive::OMPD_allocate, clauses)};
+  ConstructQueue queue{
+      buildConstructQueue(builder.getModule(), semaCtx, eval, allocate.source,
+                          llvm::omp::Directive::OMPD_allocate, clauses)};
   ConstructQueue::const_iterator item = queue.begin();
 
   // In a module (or submodule) declaration scope the list items are fir.global
