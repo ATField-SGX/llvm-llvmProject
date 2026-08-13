@@ -3018,6 +3018,13 @@ bool VPlanTransforms::splitCombinedExits(VPlan &Plan,
   if (ExitBlocks.size() != 1)
     return false;
 
+  // If there are any live-outs, bail out. The exit block is an existing IR
+  // block, and if we split the exiting block then the incoming blocks and
+  // values won't be correct.
+  // TODO: Support live-outs with combined exits.
+  if (!ExitBlocks.front()->phis().empty())
+    return false;
+
   // Split the latch block just before the terminator.
   VPBasicBlock *NewLatch = LatchVPBB->splitAt(Term->getIterator());
 
