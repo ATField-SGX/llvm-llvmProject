@@ -3007,6 +3007,10 @@ bool VPlanTransforms::splitCombinedExits(VPlan &Plan,
                                     m_Countable(Countable, PSE, L))))))
     return true;
 
+  // If the conditions are combined with a logical or (select), then we'll
+  // need to freeze the individual terms when splitting.
+  bool NeedsFreeze = match(Cond, m_LogicalOr(m_VPValue(), m_VPValue()));
+
   // If we do have a combined exit condition, bail out if there's more than
   // one exit block.
   // TODO: Support additional exits.
@@ -3019,6 +3023,9 @@ bool VPlanTransforms::splitCombinedExits(VPlan &Plan,
 
   // Create new terminator for uncountable condition.
   VPBuilder EEBuilder(LatchVPBB);
+  if (NeedsFreeze)
+    Uncountable = EEBuilder.createScalarFreeze(
+        Uncountable, Uncountable->getScalarType(), DebugLoc());
   EEBuilder.createNaryOp(VPInstruction::BranchOnCond, {Uncountable});
 
   // We need to connect the uncountable exit to the sole exit block. The
@@ -3031,6 +3038,11 @@ bool VPlanTransforms::splitCombinedExits(VPlan &Plan,
   VPBlockUtils::connectBlocks(LatchVPBB, NewLatch);
 
   // Set condition for latch block to countable condition.
+  if (NeedsFreeze) {
+    VPBuilder NewLatchBuilder(Term);
+    Countable = NewLatchBuilder.createScalarFreeze(
+        Countable, Countable->getScalarType(), DebugLoc());
+  }
   Term->setOperand(0, Countable);
 
   // Remove the combining or.
@@ -3135,8 +3147,9 @@ getRecipesForUncountableExit(SmallVectorImpl<VPInstruction *> &Recipes,
         return std::nullopt;
       Recipes.push_back(cast<VPInstruction>(V->getDefiningRecipe()));
       Recipes.push_back(cast<VPInstruction>(GepR));
-    } else if (match(V, m_VPInstruction<VPInstruction::MaskedCond>(
-                            m_VPValue(Op1)))) {
+    } else if (match(V, m_CombineOr(m_VPInstruction<VPInstruction::MaskedCond>(
+                                        m_VPValue(Op1)),
+                                    m_Freeze(m_VPValue(Op1))))) {
       Worklist.push_back(Op1);
       Recipes.push_back(cast<VPInstruction>(V->getDefiningRecipe()));
     } else
