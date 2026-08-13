@@ -2740,14 +2740,15 @@ void LoopVectorizationCostModel::collectLoopUniforms(ElementCount VF) {
     if (!Cmp || !TheLoop->contains(Cmp) || !Cmp->hasOneUse())
       continue;
 
-    // If we have an exit condition that is actually two conditions (one counted
-    // and the other uncounted) combined via an or, only add the counted
-    // comparison as a uniform value.
+    // If we have an exit condition that is actually two conditions (one
+    // countable and the other uncountable) combined via an or, only add the
+    // countable comparison as a uniform value.
     if (Legal->hasUncountableExitWithSideEffects() &&
         TheLoop->getLoopLatch() == E) {
-      if (Value *Counted =
+      if (Value *Countable =
               Legal->findCountableComparisonInCombinedCondition(Cmp)) {
-        AddToWorklistIfAllowed(cast<Instruction>(Counted));
+        if (Countable->hasOneUse())
+          AddToWorklistIfAllowed(cast<Instruction>(Countable));
         continue;
       }
     }
