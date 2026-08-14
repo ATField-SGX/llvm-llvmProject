@@ -109,6 +109,7 @@ struct SymbolAssignment : SectionCommand {
   // Command attributes for PROVIDE, HIDDEN and PROVIDE_HIDDEN.
   bool provide = false;
   bool hidden = false;
+  bool atfieldRejected = false;
 
   // This assignment references DATA_SEGMENT_RELRO_END.
   bool dataSegmentRelroEnd = false;

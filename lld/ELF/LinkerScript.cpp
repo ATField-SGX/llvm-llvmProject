@@ -223,11 +223,28 @@ static bool shouldDefineSym(Ctx &ctx, SymbolAssignment *cmd) {
   return !cmd->provide || ctx.script->shouldAddProvideSym(cmd->name);
 }
 
+static bool rejectATFieldScriptOverwrite(Ctx &ctx, StringRef name) {
+  if (!getATFieldInputObserver())
+    return false;
+  Symbol *sym = ctx.symtab->find(name);
+  if (!sym || (!sym->isDefined() && !sym->isCommon()) || !sym->file ||
+      sym->file->kind() != InputFile::ObjKind)
+    return false;
+  ErrAlways(ctx) << "ATField linker script symbol overwrite unsupported: "
+                 << name;
+  return true;
+}
+
 // Called by processSymbolAssignments() to assign definitions to
 // linker-script-defined symbols.
 void LinkerScript::addSymbol(SymbolAssignment *cmd) {
   if (!shouldDefineSym(ctx, cmd))
     return;
+  if (cmd->atfieldRejected ||
+      rejectATFieldScriptOverwrite(ctx, cmd->name)) {
+    cmd->atfieldRejected = true;
+    return;
+  }
 
   // Define a symbol.
   ExprValue value = cmd->expression();
@@ -262,6 +279,10 @@ void LinkerScript::addSymbol(SymbolAssignment *cmd) {
 void LinkerScript::declareSymbol(SymbolAssignment *cmd) {
   if (!shouldDefineSym(ctx, cmd))
     return;
+  if (rejectATFieldScriptOverwrite(ctx, cmd->name)) {
+    cmd->atfieldRejected = true;
+    return;
+  }
 
   uint8_t visibility = cmd->hidden ? STV_HIDDEN : STV_DEFAULT;
   Defined newSym(ctx, ctx.internalFile, cmd->name, STB_GLOBAL, visibility,

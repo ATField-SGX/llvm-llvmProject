@@ -1232,6 +1232,7 @@ InputSectionBase *ObjFile<ELFT>::createInputSection(uint32_t idx,
 template <class ELFT>
 void ObjFile<ELFT>::initializeSymbols(const object::ELFFile<ELFT> &obj) {
   ArrayRef<Elf_Sym> eSyms = this->getELFSyms<ELFT>();
+  ArrayRef<Elf_Shdr> objSections = getELFShdrs<ELFT>();
   if (!symbols)
     symbols = std::make_unique<Symbol *[]>(numSymbols);
 
@@ -1260,6 +1261,11 @@ void ObjFile<ELFT>::initializeSymbols(const object::ELFFile<ELFT> &obj) {
     Symbol *sym = symbols[i];
     sym->isUsedInRegularObj = true;
     if (LLVM_UNLIKELY(eSym.st_shndx == SHN_COMMON)) {
+      bool comdat = secIdx < objSections.size() &&
+                    (objSections[secIdx].sh_flags & SHF_GROUP);
+      ATFieldSymbolCandidateScope candidate(
+          sym, this, i, secIdx, binding, type, eSym.st_other & 3, true,
+          binding == STB_WEAK, comdat);
       if (value == 0 || value >= UINT32_MAX)
         Err(ctx) << this << ": common symbol '" << sym->getName()
                  << "' has invalid alignment: " << value;
@@ -1270,6 +1276,11 @@ void ObjFile<ELFT>::initializeSymbols(const object::ELFFile<ELFT> &obj) {
     }
 
     // Handle global defined symbols. Defined::section will be set in postParse.
+    bool comdat = secIdx < objSections.size() &&
+                  (objSections[secIdx].sh_flags & SHF_GROUP);
+    ATFieldSymbolCandidateScope candidate(
+        sym, this, i, secIdx, binding, type, eSym.st_other & 3, false,
+        binding == STB_WEAK, comdat);
     sym->resolve(ctx, Defined{ctx, this, StringRef(), binding, stOther, type,
                               value, size, nullptr});
   }
@@ -1283,6 +1294,12 @@ void ObjFile<ELFT>::initializeSymbols(const object::ELFFile<ELFT> &obj) {
   for (unsigned i : undefineds) {
     const Elf_Sym &eSym = eSyms[i];
     Symbol *sym = symbols[i];
+    uint32_t secIdx = eSym.st_shndx;
+    bool comdat = secIdx < objSections.size() &&
+                  (objSections[secIdx].sh_flags & SHF_GROUP);
+    ATFieldSymbolCandidateScope candidate(
+        sym, this, i, secIdx, eSym.getBinding(), eSym.getType(),
+        eSym.st_other & 3, false, eSym.getBinding() == STB_WEAK, comdat);
     sym->resolve(ctx, Undefined{this, StringRef(), eSym.getBinding(),
                                 eSym.st_other, eSym.getType()});
     sym->isUsedInRegularObj = true;
@@ -1300,6 +1317,7 @@ void ObjFile<ELFT>::initSectionsAndLocalSyms(bool ignoreComdats) {
   SymbolUnion *locals = makeThreadLocalN<SymbolUnion>(firstGlobal);
 
   ArrayRef<Elf_Sym> eSyms = this->getELFSyms<ELFT>();
+  ArrayRef<Elf_Shdr> objSections = getELFShdrs<ELFT>();
   for (size_t i = 0, end = firstGlobal; i != end; ++i) {
     const Elf_Sym &eSym = eSyms[i];
     uint32_t secIdx = eSym.st_shndx;
@@ -1333,6 +1351,15 @@ void ObjFile<ELFT>::initSectionsAndLocalSyms(bool ignoreComdats) {
     else
       new (symbols[i]) Defined(ctx, this, name, STB_LOCAL, eSym.st_other, type,
                                eSym.st_value, eSym.st_size, sec);
+    if (type != STT_FILE) {
+      bool comdat = secIdx < objSections.size() &&
+                    (objSections[secIdx].sh_flags & SHF_GROUP);
+      ATFieldSymbolCandidateScope candidate(
+          symbols[i], this, i, secIdx, STB_LOCAL, type, eSym.st_other & 3,
+          false, false, comdat);
+      if (symbols[i]->isDefined())
+        noteATFieldSymbolWinner(symbols[i]);
+    }
     symbols[i]->isUsedInRegularObj = true;
   }
 }

@@ -251,6 +251,7 @@ protected:
         inDynamicList(false), referenced(false), referencedAfterWrap(false) {}
 
   void overwrite(Symbol &sym, Kind k) const {
+    invalidateATFieldSymbolWinner(&sym);
     if (sym.traced)
       printTraceSymbol(*this, sym.getName());
     sym.file = file;

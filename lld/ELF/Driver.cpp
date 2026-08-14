@@ -148,8 +148,10 @@ static bool linkImpl(ArrayRef<const char *> args,
   ctx.driver.linkerMain(args);
 
   bool success = errCount(ctx) == 0;
-  if (success)
+  if (success) {
+    notifyATFieldSymbolWinners(ctx);
     notifyATFieldPayloadIncludedSnapshot();
+  }
   return success;
 }
 
@@ -273,11 +275,11 @@ static bool isBitcode(MemoryBufferRef mb) {
   return identify_magic(mb.getBuffer()) == llvm::file_magic::bitcode;
 }
 
-static void rejectFatLTO(Ctx &ctx, MemoryBufferRef mb, StringRef path) {
-  Expected<MemoryBufferRef> fatLTOData =
-      IRObjectFile::findBitcodeInMemBuffer(mb);
-  if (!errorToBool(fatLTOData.takeError()))
-    Fatal(ctx) << path << ": fat LTO objects are not supported";
+static bool rejectATFieldBitcode(Ctx &ctx, StringRef path) {
+  if (!getATFieldInputObserver())
+    return false;
+  ErrAlways(ctx) << "ATField LLVM bitcode unsupported: " << path;
+  return true;
 }
 
 static ATFieldInputKind getATFieldInputKind(const InputFile *file) {
@@ -390,6 +392,26 @@ static void notifyATFieldArchiveMember(
   file->atfieldExternalMemberBytes = thinArchive;
 }
 
+bool LinkerDriver::tryAddFatLTOFile(MemoryBufferRef mb, StringRef archiveName,
+                                    uint64_t offsetInArchive, bool lazy) {
+  const bool observer = getATFieldInputObserver() != nullptr;
+  if (!ctx.arg.fatLTOObjects && !observer)
+    return false;
+  Expected<MemoryBufferRef> fatLTOData =
+      IRObjectFile::findBitcodeInMemBuffer(mb);
+  if (errorToBool(fatLTOData.takeError()))
+    return false;
+  if (observer) {
+    ErrAlways(ctx) << "ATField fat LTO unsupported: " << archiveName;
+    return true;
+  }
+  auto file = std::make_unique<BitcodeFile>(ctx, *fatLTOData, archiveName,
+                                            offsetInArchive, lazy);
+  file->obj->fatLTOObject(true);
+  files.push_back(std::move(file));
+  return true;
+}
+
 // Opens a file and create a file object. Path has to be resolved already.
 void LinkerDriver::addFile(StringRef path, bool withLOption) {
   using namespace sys::fs;
@@ -425,12 +447,18 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
         auto magic = identify_magic(member.buffer.getBuffer());
         InputFile *file = nullptr;
         if (isBitcode(member.buffer)) {
+          if (rejectATFieldBitcode(ctx, path))
+            return;
           file = new BitcodeFile(ctx, member.buffer, path,
                                  member.childHeaderOffset, false);
         } else if (magic == file_magic::elf_relocatable) {
-          rejectFatLTO(ctx, member.buffer, path);
-          files.push_back(
-              createObjFile(ctx, member.buffer, path, /*lazy=*/false));
+          const size_t oldFileCount = files.size();
+          if (!tryAddFatLTOFile(member.buffer, path, member.childHeaderOffset,
+                                false))
+            files.push_back(
+                createObjFile(ctx, member.buffer, path, /*lazy=*/false));
+          else if (files.size() == oldFileCount)
+            return;
           file = files.back().get();
         }
         if (!file)
@@ -475,11 +503,22 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
       auto magic = identify_magic(member.buffer.getBuffer());
       InputFile *file = nullptr;
       std::unique_ptr<InputFile> owned;
+      bool alreadyStored = false;
       if (magic == file_magic::elf_relocatable) {
-        rejectFatLTO(ctx, member.buffer, path);
-        owned = createObjFile(ctx, member.buffer, path, true);
-        file = owned.get();
+        const size_t oldFileCount = files.size();
+        if (tryAddFatLTOFile(member.buffer, path, member.childHeaderOffset,
+                             true)) {
+          if (files.size() == oldFileCount)
+            return;
+          file = files.back().get();
+          alreadyStored = true;
+        } else {
+          owned = createObjFile(ctx, member.buffer, path, true);
+          file = owned.get();
+        }
       } else if (magic == file_magic::bitcode) {
+        if (rejectATFieldBitcode(ctx, path))
+          return;
         owned = std::make_unique<BitcodeFile>(
             ctx, member.buffer, path, member.childHeaderOffset, true);
         file = owned.get();
@@ -504,7 +543,8 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
                               archive.thin);
         notifyATFieldArchiveMember(member, path, archiveOccurrence, file, false,
                                    archive.thin);
-        files.push_back(std::move(owned));
+        if (!alreadyStored)
+          files.push_back(std::move(owned));
       }
     }
     if (!saved.get())
@@ -512,6 +552,10 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
     return;
   }
   case file_magic::elf_shared_object: {
+    if (getATFieldInputObserver()) {
+      ErrAlways(ctx) << "ATField shared object unsupported: " << path;
+      return;
+    }
     if (ctx.arg.isStatic) {
       ErrAlways(ctx) << "attempted static link of dynamic object " << path;
       return;
@@ -529,12 +573,19 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
     return;
   }
   case file_magic::bitcode:
+    if (rejectATFieldBitcode(ctx, path))
+      return;
     files.push_back(std::make_unique<BitcodeFile>(ctx, mbref, "", 0, inLib));
     notifyATFieldDirectFile(files.back().get(), path);
     break;
   case file_magic::elf_relocatable:
-    rejectFatLTO(ctx, mbref, path);
-    files.push_back(createObjFile(ctx, mbref, "", inLib));
+    {
+      const size_t oldFileCount = files.size();
+      if (!tryAddFatLTOFile(mbref, "", 0, inLib))
+        files.push_back(createObjFile(ctx, mbref, "", inLib));
+      if (files.size() == oldFileCount)
+        return;
+    }
     notifyATFieldDirectFile(files.back().get(), path);
     break;
   default:
@@ -2203,6 +2254,13 @@ static void readConfigs(Ctx &ctx, opt::InputArgList &args) {
     }
     clearATFieldArgumentContext();
   }
+
+  if (getATFieldInputObserver()) {
+    if (args.hasArg(OPT_wrap))
+      ErrAlways(ctx) << "ATField --wrap unsupported";
+    if (args.hasArg(OPT_noinhibit_exec))
+      ErrAlways(ctx) << "ATField --noinhibit-exec unsupported";
+  }
 }
 
 // Some Config members do not directly correspond to any particular
@@ -3221,6 +3279,10 @@ static void markBuffersAsDontNeed(Ctx &ctx, bool skipLinkedOutput) {
 template <class ELFT>
 void LinkerDriver::compileBitcodeFiles(bool skipLinkedOutput) {
   llvm::TimeTraceScope timeScope("LTO");
+  if (getATFieldInputObserver() && !ctx.bitcodeFiles.empty()) {
+    ErrAlways(ctx) << "ATField LLVM bitcode unsupported";
+    return;
+  }
   // Compile bitcode files and replace bitcode symbols.
   lto.reset(new BitcodeCompiler(ctx));
   for (BitcodeFile *file : ctx.bitcodeFiles)
@@ -3348,6 +3410,10 @@ static void combineVersionedSymbol(Ctx &ctx, Symbol &sym,
   const char *suffix2 = sym2->getVersionSuffix();
   if (suffix2[0] == '@' && suffix2[1] == '@' &&
       strcmp(suffix1 + 1, suffix2 + 2) == 0) {
+    if (getATFieldInputObserver()) {
+      ErrAlways(ctx) << "ATField versioned symbol alias merge unsupported";
+      return;
+    }
     // foo@v1 and foo@@v1 should be merged, so redirect foo@v1 to foo@@v1.
     map.try_emplace(&sym, sym2);
     // If both foo@v1 and foo@@v1 are defined and non-weak, report a
@@ -3367,6 +3433,10 @@ static void combineVersionedSymbol(Ctx &ctx, Symbol &sym,
     if (sym2->versionId > VER_NDX_GLOBAL
             ? ctx.arg.versionDefinitions[sym2->versionId].name == suffix1 + 1
             : sym1->section == sym2->section && sym1->value == sym2->value) {
+      if (getATFieldInputObserver()) {
+        ErrAlways(ctx) << "ATField versioned symbol alias merge unsupported";
+        return;
+      }
       // Due to an assembler design flaw, if foo is defined, .symver foo,
       // foo@v1 defines both foo and foo@v1. Unless foo is bound to a
       // different version, GNU ld makes foo@v1 canonical and eliminates

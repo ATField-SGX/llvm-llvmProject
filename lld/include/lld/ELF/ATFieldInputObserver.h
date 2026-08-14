@@ -17,6 +17,7 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 namespace lld::elf {
@@ -298,6 +299,9 @@ struct ATFieldObserverState {
   ATFieldOccurrence nextOccurrence = 1;
   uint64_t payloadOrdinal = 0;
   ATFieldArgumentContext argumentContext;
+  // Candidate/winner mutations happen during parallel object parsing.
+  // Terminal publication reads these maps only after parsing joins.
+  std::recursive_mutex symbolStateMutex;
   llvm::DenseMap<Symbol *, ATFieldSymbolCandidate> candidate;
   llvm::DenseMap<Symbol *, ATFieldSymbolCandidate> winners;
   llvm::DenseMap<Symbol *, uint64_t> canonicalTargetTokens;
@@ -395,13 +399,24 @@ void notifyATFieldLinkerScript(uint64_t, llvm::StringRef,
 ATFieldOccurrence ensureATFieldScriptOccurrence(uint64_t) noexcept;
 void notifyATFieldInputSections() noexcept;
 bool claimATFieldTerminalNotification() noexcept;
-void setATFieldSymbolCandidate(Symbol *, InputFile *, uint64_t, uint32_t,
-                               uint8_t, uint8_t, uint8_t, bool, bool, bool);
-void clearATFieldSymbolCandidate() noexcept;
+class ATFieldSymbolCandidateScope {
+public:
+  ATFieldSymbolCandidateScope(Symbol *, InputFile *, uint64_t, uint32_t,
+                              uint8_t, uint8_t, uint8_t, bool, bool, bool);
+  ~ATFieldSymbolCandidateScope();
+  ATFieldSymbolCandidateScope(const ATFieldSymbolCandidateScope &) = delete;
+  ATFieldSymbolCandidateScope &
+  operator=(const ATFieldSymbolCandidateScope &) = delete;
+
+private:
+  Symbol *symbol = nullptr;
+  std::unique_lock<std::recursive_mutex> lock;
+};
+void invalidateATFieldSymbolWinner(Symbol *) noexcept;
 void noteATFieldSymbolWinner(Symbol *) noexcept;
 bool getATFieldSymbolWinner(Symbol *, ATFieldOccurrence &, uint64_t &,
                             uint32_t &) noexcept;
-void notifyATFieldSymbolWinners(Ctx &, llvm::ArrayRef<Symbol *>) noexcept;
+void notifyATFieldSymbolWinners(Ctx &) noexcept;
 
 bool linkWithATField(llvm::ArrayRef<const char *>, llvm::raw_ostream &,
                      llvm::raw_ostream &, bool, bool, void *);

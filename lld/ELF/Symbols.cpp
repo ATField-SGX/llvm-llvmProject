@@ -613,8 +613,10 @@ void Symbol::resolve(Ctx &ctx, const Defined &other) {
     uint8_t v = visibility(), ov = other.visibility();
     setVisibility(v == STV_DEFAULT ? ov : std::min(v, ov));
   }
-  if (shouldReplace(ctx, other))
+  if (shouldReplace(ctx, other)) {
     other.overwrite(*this);
+    noteATFieldSymbolWinner(this);
+  }
 }
 
 void Symbol::resolve(Ctx &ctx, const LazySymbol &other) {

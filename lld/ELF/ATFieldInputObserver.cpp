@@ -9,7 +9,9 @@
 #include "lld/ELF/ATFieldInputObserver.h"
 #include "InputFiles.h"
 #include "OutputSections.h"
+#include "SymbolTable.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include <algorithm>
 
@@ -143,21 +145,37 @@ void lld::elf::clearATFieldArgumentContext() noexcept {
   state().argumentContext = {};
 }
 
-void lld::elf::setATFieldSymbolCandidate(
+lld::elf::ATFieldSymbolCandidateScope::ATFieldSymbolCandidateScope(
     Symbol *symbol, InputFile *file, uint64_t inputSymbolIndex,
     uint32_t inputSectionIndex, uint8_t inputBinding, uint8_t inputType,
-    uint8_t inputVisibility, bool common, bool weak, bool comdat) {
+    uint8_t inputVisibility, bool common, bool weak, bool comdat)
+    : symbol(symbol) {
   if (!getATFieldInputObserver() || !symbol || !file)
     return;
-  state().candidate[symbol] = {file, inputSymbolIndex, inputSectionIndex,
-                               inputBinding, inputType, inputVisibility,
-                               common, weak, comdat};
+  auto &s = state();
+  lock = std::unique_lock<std::recursive_mutex>(s.symbolStateMutex);
+  s.candidate[symbol] = {file, inputSymbolIndex, inputSectionIndex,
+                         inputBinding, inputType, inputVisibility, common,
+                         weak, comdat};
 }
-void lld::elf::clearATFieldSymbolCandidate() noexcept {
-  state().candidate.clear();
+lld::elf::ATFieldSymbolCandidateScope::~ATFieldSymbolCandidateScope() {
+  if (!lock.owns_lock())
+    return;
+  state().candidate.erase(symbol);
+  lock.unlock();
+}
+void lld::elf::invalidateATFieldSymbolWinner(Symbol *symbol) noexcept {
+  if (!getATFieldInputObserver() || !symbol)
+    return;
+  auto &s = state();
+  std::lock_guard<std::recursive_mutex> lock(s.symbolStateMutex);
+  s.winners.erase(symbol);
 }
 void lld::elf::noteATFieldSymbolWinner(Symbol *symbol) noexcept {
+  if (!getATFieldInputObserver() || !symbol)
+    return;
   auto &s = state();
+  std::lock_guard<std::recursive_mutex> lock(s.symbolStateMutex);
   if (auto it = s.candidate.find(symbol); it != s.candidate.end())
     s.winners[symbol] = it->second;
 }
@@ -175,6 +193,8 @@ bool lld::elf::getATFieldSymbolWinner(Symbol *symbol,
                                       ATFieldOccurrence &inputOccurrence,
                                       uint64_t &inputSymbolIndex,
                                       uint32_t &inputSectionIndex) noexcept {
+  // Called after parallel symbol initialization joins; terminal reads do not
+  // hold symbolStateMutex so observer callbacks never run under this lock.
   auto &s = state();
   auto it = s.winners.find(symbol);
   if (it == s.winners.end() || !it->second.file ||
@@ -185,12 +205,22 @@ bool lld::elf::getATFieldSymbolWinner(Symbol *symbol,
   inputSectionIndex = it->second.inputSectionIndex;
   return true;
 }
-void lld::elf::notifyATFieldSymbolWinners(
-    Ctx &ctx, llvm::ArrayRef<Symbol *> symbols) noexcept {
+void lld::elf::notifyATFieldSymbolWinners(Ctx &ctx) noexcept {
+  // Called after parallel symbol initialization joins. Snapshot all state
+  // before callbacks and never hold symbolStateMutex across observer calls.
   auto *current = getATFieldInputObserver();
   if (!current)
     return;
   auto &s = state();
+  llvm::SmallVector<Symbol *, 0> symbols;
+  llvm::DenseSet<Symbol *> seen;
+  for (Symbol *symbol : ctx.symtab->getSymbols())
+    if (symbol && seen.insert(symbol).second)
+      symbols.push_back(symbol);
+  for (ELFFileBase *file : ctx.objectFiles)
+    for (Symbol *symbol : file->getSymbols())
+      if (symbol && seen.insert(symbol).second)
+        symbols.push_back(symbol);
   llvm::SmallVector<ATFieldSymbolWinnerKey, 0> expectedKeys;
   for (Symbol *symbol : symbols) {
     auto it = s.winners.find(symbol);
