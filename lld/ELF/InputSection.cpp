@@ -1442,7 +1442,12 @@ template <class ELFT> void EhInputSection::split() {
     unsigned firstRel = -1;
     if (relI != rels.size() && rels[relI].offset < off + size)
       firstRel = relI;
-    (id == 0 ? cies : fdes).emplace_back(off, this, size, firstRel);
+    EhSectionPiece &piece =
+        (id == 0 ? cies : fdes).emplace_back(off, this, size, firstRel);
+    if (firstRel != unsigned(-1)) {
+      piece.rawRelocationIndex = rels[firstRel].rawRelocationIndex;
+      piece.rawSymbolIndex = rels[firstRel].rawSymbolIndex;
+    }
     d = d.slice(size);
   }
   if (msg)
@@ -1454,6 +1459,7 @@ template <class ELFT, class RelTy>
 void EhInputSection::preprocessRelocs(Relocs<RelTy> elfRels) {
   Ctx &ctx = file->ctx;
   rels.reserve(elfRels.size());
+  uint64_t rawRelocationIndex = 0;
   for (auto rel : elfRels) {
     uint64_t offset = rel.r_offset;
     Symbol &sym = file->getSymbol(rel.getSymbol(ctx.arg.isMips64EL));
@@ -1463,7 +1469,8 @@ void EhInputSection::preprocessRelocs(Relocs<RelTy> elfRels) {
         RelTy::HasAddend
             ? getAddend<ELFT>(rel)
             : ctx.target->getImplicitAddend(content().data() + offset, type);
-    rels.push_back({expr, type, offset, addend, &sym});
+    rels.push_back({expr, type, offset, addend, &sym, rawRelocationIndex++,
+                    rel.getSymbol(ctx.arg.isMips64EL)});
   }
 }
 

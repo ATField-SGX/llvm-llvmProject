@@ -149,6 +149,7 @@ static bool linkImpl(ArrayRef<const char *> args,
 
   bool success = errCount(ctx) == 0;
   if (success) {
+    notifyATFieldInputSections(ctx);
     notifyATFieldSymbolWinners(ctx);
     notifyATFieldPayloadIncludedSnapshot();
   }
@@ -918,6 +919,10 @@ void LinkerDriver::linkerMain(ArrayRef<const char *> argsArr) {
       args.hasFlag(OPT_fatal_warnings, OPT_no_fatal_warnings, false) &&
       !args.hasArg(OPT_no_warnings);
   ctx.e.suppressWarnings = args.hasArg(OPT_no_warnings);
+  if (getATFieldInputObserver() && ctx.e.disableOutput) {
+    ErrAlways(ctx) << "ATField disableOutput unsupported";
+    return;
+  }
 
   // Handle -help
   if (args.hasArg(OPT_help)) {
@@ -983,6 +988,9 @@ void LinkerDriver::linkerMain(ArrayRef<const char *> argsArr) {
 
     inferMachineType();
     setConfigs(ctx, args);
+    if (getATFieldInputObserver() &&
+        (ctx.arg.ekind != ELF64LEKind || ctx.arg.emachine != EM_X86_64))
+      ErrAlways(ctx) << "ATField requires ELF64LE x86-64 output";
     checkOptions(ctx);
     if (errCount(ctx))
       return;
@@ -2260,6 +2268,22 @@ static void readConfigs(Ctx &ctx, opt::InputArgList &args) {
       ErrAlways(ctx) << "ATField --wrap unsupported";
     if (args.hasArg(OPT_noinhibit_exec))
       ErrAlways(ctx) << "ATField --noinhibit-exec unsupported";
+    if (ctx.arg.relocatable)
+      ErrAlways(ctx) << "ATField relocatable output unsupported";
+    if (ctx.arg.oFormatBinary)
+      ErrAlways(ctx) << "ATField binary output unsupported";
+    if (!ctx.arg.zSectionHeader)
+      ErrAlways(ctx) << "ATField -z nosectionheader unsupported";
+    if (ctx.arg.compressDebugSections || !ctx.arg.compressSections.empty())
+      ErrAlways(ctx) << "ATField output compression unsupported";
+    if (ctx.arg.strip != StripPolicy::None)
+      ErrAlways(ctx) << "ATField stripping unsupported";
+    if (ctx.arg.icf != ICFLevel::None)
+      ErrAlways(ctx) << "ATField ICF unsupported";
+    if (args.hasArg(OPT_lto_partitions) && ctx.arg.ltoPartitions > 1)
+      ErrAlways(ctx) << "ATField multi-partition output unsupported";
+    if (!ctx.arg.checkSections)
+      ErrAlways(ctx) << "ATField --no-check-sections unsupported";
   }
 }
 
@@ -3991,6 +4015,10 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
         return false;
       });
     }
+  }
+  if (getATFieldInputObserver() && ctx.partitions.size() > 1) {
+    ErrAlways(ctx) << "ATField multi-partition output unsupported";
+    return;
   }
 
   // Since we now have a complete set of input files, we can create

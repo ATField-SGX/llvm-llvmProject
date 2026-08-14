@@ -160,6 +160,7 @@ public:
   bool atfieldExternalMemberBytes = false;
   bool atfieldIncluded = false;
   SmallVector<ATFieldInputSectionSnapshot, 0> atfieldSectionSnapshots;
+  SmallVector<uint32_t, 0> atfieldComdatDiscardedSectionIndices;
 
   // True if this is an argument for --just-symbols. Usually false.
   bool justSymbols = false;

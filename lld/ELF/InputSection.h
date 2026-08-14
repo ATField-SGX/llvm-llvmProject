@@ -384,6 +384,8 @@ struct EhSectionPiece {
   InputSectionBase *sec;
   uint32_t size;
   unsigned firstRelocation;
+  uint64_t rawRelocationIndex = ~uint64_t(0);
+  uint64_t rawSymbolIndex = ~uint64_t(0);
 };
 
 // This corresponds to a .eh_frame section of an input file.

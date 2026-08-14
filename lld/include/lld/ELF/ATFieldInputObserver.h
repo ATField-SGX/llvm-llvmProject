@@ -17,7 +17,9 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdint>
+#include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace lld::elf {
@@ -181,10 +183,17 @@ struct ATFieldLinkerScriptEvent {
   llvm::StringRef path;
   llvm::MemoryBufferRef contents;
 };
+enum class ATFieldInputSectionPieceDisposition : uint8_t {
+  Retained,
+  Dead,
+  Padding,
+};
 struct ATFieldInputSectionPiece {
   uint64_t inputOffset = 0;
   uint64_t size = 0;
   uint64_t outputOffset = ~uint64_t(0);
+  ATFieldInputSectionPieceDisposition disposition =
+      ATFieldInputSectionPieceDisposition::Retained;
   bool live = false;
   bool cie = false;
   uint64_t firstRelocationIndex = ~uint64_t(0);
@@ -197,6 +206,26 @@ struct ATFieldInputSectionPiece {
   bool targetFolded = false;
   bool targetHasSection = false;
   uint32_t targetPartition = 0;
+};
+enum class ATFieldInputSectionDisposition : uint8_t {
+  Metadata,
+  Discarded,
+  Dead,
+  Retained,
+};
+enum class ATFieldInputSectionDiscardReason : uint8_t {
+  None,
+  Parser,
+  Comdat,
+  Exclude,
+  Script,
+  Target,
+};
+enum class ATFieldInputSectionPlacement : uint8_t {
+  None,
+  Explicit,
+  Orphan,
+  Synthetic,
 };
 struct ATFieldInputSectionResolutionEvent {
   ATFieldOccurrence inputOccurrence = 0;
@@ -217,13 +246,22 @@ struct ATFieldInputSectionResolutionEvent {
   uint64_t outputSectionFileOffset = 0;
   uint64_t outputSectionSize = 0;
   uint64_t outputSectionOffset = 0;
+  uint64_t outputSectionAlignment = 0;
   bool present = true;
   bool discarded = false;
+  ATFieldInputSectionDisposition disposition =
+      ATFieldInputSectionDisposition::Metadata;
+  ATFieldInputSectionDiscardReason discardReason =
+      ATFieldInputSectionDiscardReason::None;
+  ATFieldInputSectionPlacement placement =
+      ATFieldInputSectionPlacement::None;
   llvm::ArrayRef<ATFieldInputSectionPiece> pieces;
 };
 struct ATFieldInputSectionSnapshot {
   bool present = false;
   bool discarded = false;
+  ATFieldInputSectionDiscardReason discardReason =
+      ATFieldInputSectionDiscardReason::None;
   llvm::StringRef name;
   uint32_t type = 0;
   uint64_t flags = 0;
@@ -309,8 +347,12 @@ struct ATFieldObserverState {
   llvm::DenseMap<uint64_t, ATFieldOccurrence> scriptOccurrences;
   llvm::DenseMap<uint64_t, uint64_t> archiveEncounterOrdinals;
   llvm::SmallVector<ATFieldPayloadIncludedEvent, 0> payloadIncludedEvents;
+  llvm::SmallVector<ATFieldInputSectionResolutionEvent, 0>
+      preparedInputSections;
+  llvm::SmallVector<ATFieldInputSectionPiece, 0> preparedInputSectionPieces;
+  llvm::SmallVector<std::unique_ptr<std::string>, 0>
+      preparedInputSectionStrings;
   bool payloadSnapshotNotified = false;
-  bool terminalNotified = false;
 };
 
 // Event strings and buffers are borrowed until the synchronous callback returns.
@@ -329,8 +371,8 @@ public:
       llvm::ArrayRef<ATFieldPayloadIncludedEvent>) {}
   virtual void onParse(const ATFieldInputParseEvent &) {}
   virtual void onLinkerScript(const ATFieldLinkerScriptEvent &) {}
-  virtual void onInputSectionResolved(
-      const ATFieldInputSectionResolutionEvent &) {}
+  virtual void onInputSectionsResolved(
+      llvm::ArrayRef<ATFieldInputSectionResolutionEvent>) {}
   virtual void onSymbolWinner(const ATFieldSymbolWinnerEvent &) {}
   virtual void onExpectedSymbolWinnerKeys(
       llvm::ArrayRef<ATFieldSymbolWinnerKey>) {}
@@ -397,8 +439,8 @@ void notifyATFieldLinkerScript(uint64_t, llvm::StringRef,
                                llvm::MemoryBufferRef, bool nested = false,
                                ATFieldOccurrence nestedOccurrence = 0) noexcept;
 ATFieldOccurrence ensureATFieldScriptOccurrence(uint64_t) noexcept;
-void notifyATFieldInputSections() noexcept;
-bool claimATFieldTerminalNotification() noexcept;
+void prepareATFieldInputSections(Ctx &) noexcept;
+void notifyATFieldInputSections(Ctx &) noexcept;
 class ATFieldSymbolCandidateScope {
 public:
   ATFieldSymbolCandidateScope(Symbol *, InputFile *, uint64_t, uint32_t,

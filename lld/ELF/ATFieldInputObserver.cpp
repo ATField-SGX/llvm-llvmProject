@@ -14,8 +14,12 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include <algorithm>
+#include <memory>
+#include <string>
+#include <utility>
 
 using namespace lld::elf;
+using namespace llvm;
 
 namespace {
 ATFieldObserverState &state() { return lld::context<Ctx>().atfieldObserver; }
@@ -104,10 +108,12 @@ void lld::elf::beginATFieldLink() noexcept {
   s.canonicalTargetTokens.clear();
   s.nextCanonicalTargetToken = 1;
   s.payloadIncludedEvents.clear();
+  s.preparedInputSections.clear();
+  s.preparedInputSectionPieces.clear();
+  s.preparedInputSectionStrings.clear();
   s.scriptOccurrences.clear();
   s.archiveEncounterOrdinals.clear();
   s.payloadSnapshotNotified = false;
-  s.terminalNotified = false;
 }
 ATFieldOccurrence lld::elf::ensureATFieldScriptOccurrence(
     uint64_t argumentOrdinal) noexcept {
@@ -127,13 +133,6 @@ ATFieldOccurrence lld::elf::ensureATFieldScriptOccurrence(
   s.scriptOccurrences[argumentOrdinal] = occurrence;
   return occurrence;
 }
-bool lld::elf::claimATFieldTerminalNotification() noexcept {
-  auto &s = state();
-  if (s.terminalNotified)
-    return false;
-  s.terminalNotified = true;
-  return true;
-}
 ATFieldArgumentContext lld::elf::getATFieldArgumentContext() noexcept {
   return state().argumentContext;
 }
@@ -143,6 +142,313 @@ void lld::elf::setATFieldArgumentContext(
 }
 void lld::elf::clearATFieldArgumentContext() noexcept {
   state().argumentContext = {};
+}
+
+static bool isATFieldMetadataType(uint32_t type) {
+  return type == llvm::ELF::SHT_NULL || type == llvm::ELF::SHT_SYMTAB ||
+         type == llvm::ELF::SHT_STRTAB || type == llvm::ELF::SHT_REL ||
+         type == llvm::ELF::SHT_RELA || type == llvm::ELF::SHT_CREL ||
+         type == llvm::ELF::SHT_SYMTAB_SHNDX || type == llvm::ELF::SHT_GROUP ||
+         type == llvm::ELF::SHT_LLVM_ADDRSIG ||
+         type == llvm::ELF::SHT_LLVM_CALL_GRAPH_PROFILE ||
+         type == llvm::ELF::SHT_LLVM_DEPENDENT_LIBRARIES ||
+         type == llvm::ELF::SHT_GNU_ATTRIBUTES ||
+         type == llvm::ELF::SHT_ARM_ATTRIBUTES ||
+         type == llvm::ELF::SHT_AARCH64_ATTRIBUTES ||
+         type == llvm::ELF::SHT_RISCV_ATTRIBUTES ||
+         type == llvm::ELF::SHT_MIPS_ABIFLAGS;
+}
+
+static StringRef ownATFieldSectionString(ATFieldObserverState &s,
+                                         StringRef value) {
+  auto storage = std::make_unique<std::string>(value.str());
+  StringRef result(*storage);
+  s.preparedInputSectionStrings.push_back(std::move(storage));
+  return result;
+}
+
+static void setATFieldSectionPlacement(
+    Ctx &ctx, InputSectionBase *section,
+    ATFieldInputSectionResolutionEvent &event) {
+  if (ctx.atfieldExplicitSections.contains(section))
+    event.placement = ATFieldInputSectionPlacement::Explicit;
+  else if (ctx.atfieldOrphanSections.contains(section))
+    event.placement = ATFieldInputSectionPlacement::Orphan;
+}
+
+static void appendATFieldSectionPiece(
+    SmallVectorImpl<ATFieldInputSectionPiece> &pieces, uint64_t inputOffset,
+    uint64_t size, uint64_t outputOffset,
+    ATFieldInputSectionPieceDisposition disposition, bool live) {
+  if (size == 0)
+    return;
+  ATFieldInputSectionPiece &piece = pieces.emplace_back();
+  piece.inputOffset = inputOffset;
+  piece.size = size;
+  piece.outputOffset = outputOffset;
+  piece.disposition = disposition;
+  piece.live = live;
+}
+
+static void fillATFieldPieceTarget(ATFieldInputSectionPiece &piece,
+                                   Symbol *target) {
+  if (!target)
+    return;
+  piece.targetDefined = target->isDefined();
+  piece.targetFolded = target->folded;
+  piece.targetPartition = target->partition;
+  if (target->isDefined())
+    piece.targetHasSection = cast<Defined>(target)->section != nullptr;
+  piece.resolvedTargetHasWinner = getATFieldSymbolWinner(
+      target, piece.resolvedTargetInputOccurrence,
+      piece.resolvedTargetInputSymbolIndex,
+      piece.resolvedTargetInputSectionIndex);
+}
+
+static bool fillATFieldMergePieces(
+    Ctx &ctx, MergeInputSection &section,
+    SmallVectorImpl<ATFieldInputSectionPiece> &pieces) {
+  uint64_t cursor = 0;
+  uint64_t contentSize = section.content().size();
+  for (size_t index = 0; index != section.pieces.size(); ++index) {
+    const SectionPiece &source = section.pieces[index];
+    uint64_t inputOffset = source.inputOff;
+    uint64_t end = index + 1 == section.pieces.size()
+                       ? contentSize
+                       : section.pieces[index + 1].inputOff;
+    if (inputOffset != cursor || end < inputOffset || end > contentSize) {
+      ErrAlways(ctx) << "ATField merge section pieces do not cover input";
+      return false;
+    }
+    bool retained = source.live && section.getOutputSection();
+    appendATFieldSectionPiece(
+        pieces, inputOffset, end - inputOffset,
+        retained ? section.getOffset(inputOffset) : ~uint64_t(0),
+        retained ? ATFieldInputSectionPieceDisposition::Retained
+                 : ATFieldInputSectionPieceDisposition::Dead,
+        retained);
+    cursor = end;
+  }
+  if (cursor != contentSize) {
+    ErrAlways(ctx) << "ATField merge section pieces do not cover input";
+    return false;
+  }
+  return true;
+}
+
+static bool fillATFieldEhPieces(
+    Ctx &ctx, EhInputSection &section,
+    SmallVectorImpl<ATFieldInputSectionPiece> &pieces) {
+  SmallVector<std::pair<const EhSectionPiece *, bool>, 0> sources;
+  sources.reserve(section.cies.size() + section.fdes.size());
+  for (const EhSectionPiece &piece : section.cies)
+    sources.emplace_back(&piece, true);
+  for (const EhSectionPiece &piece : section.fdes)
+    sources.emplace_back(&piece, false);
+  llvm::sort(sources, [](const auto &a, const auto &b) {
+    return a.first->inputOff < b.first->inputOff;
+  });
+
+  uint64_t cursor = 0;
+  uint64_t contentSize = section.content().size();
+  for (const auto &[source, cie] : sources) {
+    uint64_t inputOffset = source->inputOff;
+    uint64_t end = inputOffset + source->size;
+    if (inputOffset < cursor || end < inputOffset || end > contentSize) {
+      ErrAlways(ctx) << "ATField EH section pieces overlap or exceed input";
+      return false;
+    }
+    if (inputOffset > cursor) {
+      if (!llvm::all_of(
+              section.content().slice(cursor, inputOffset - cursor),
+              [](uint8_t byte) { return byte == 0; })) {
+        ErrAlways(ctx) << "ATField EH gap contains non-zero bytes";
+        return false;
+      }
+      appendATFieldSectionPiece(
+          pieces, cursor, inputOffset - cursor, ~uint64_t(0),
+          ATFieldInputSectionPieceDisposition::Padding, false);
+    }
+
+    bool zeroTerminator =
+        source->size == 4 &&
+        llvm::all_of(section.content().slice(inputOffset, source->size),
+                     [](uint8_t byte) { return byte == 0; });
+    bool retained = section.isLive() && source->outputOff >= 0 &&
+                    section.getOutputSection() && !zeroTerminator;
+    appendATFieldSectionPiece(
+        pieces, inputOffset, source->size,
+        retained ? section.getOffset(inputOffset) : ~uint64_t(0),
+        zeroTerminator
+            ? ATFieldInputSectionPieceDisposition::Padding
+            : retained ? ATFieldInputSectionPieceDisposition::Retained
+                       : ATFieldInputSectionPieceDisposition::Dead,
+        retained);
+    ATFieldInputSectionPiece &record = pieces.back();
+    if (!zeroTerminator) {
+      if (!cie && source->firstRelocation == unsigned(-1)) {
+        ErrAlways(ctx) << "ATField EH FDE lacks relocation provenance";
+        return false;
+      }
+      record.cie = cie;
+      record.firstRelocationIndex = source->rawRelocationIndex;
+      record.rawTargetInputSymbolIndex = source->rawSymbolIndex;
+      Symbol *target = source->firstRelocation != unsigned(-1) &&
+                               source->firstRelocation < section.rels.size()
+                           ? section.rels[source->firstRelocation].sym
+                           : nullptr;
+      fillATFieldPieceTarget(record, target);
+    }
+    cursor = end;
+  }
+  if (cursor < contentSize) {
+    if (!llvm::all_of(
+            section.content().slice(cursor, contentSize - cursor),
+            [](uint8_t byte) { return byte == 0; })) {
+      ErrAlways(ctx) << "ATField EH trailing padding contains non-zero bytes";
+      return false;
+    }
+    if (cursor + 4 <= contentSize) {
+      appendATFieldSectionPiece(
+          pieces, cursor, 4, ~uint64_t(0),
+          ATFieldInputSectionPieceDisposition::Padding, false);
+      cursor += 4;
+    }
+  }
+  if (cursor < contentSize)
+    appendATFieldSectionPiece(
+        pieces, cursor, contentSize - cursor, ~uint64_t(0),
+        ATFieldInputSectionPieceDisposition::Padding, false);
+  return true;
+}
+
+void lld::elf::prepareATFieldInputSections(Ctx &ctx) noexcept {
+  if (!getATFieldInputObserver())
+    return;
+  auto &s = state();
+  s.preparedInputSections.clear();
+  s.preparedInputSectionPieces.clear();
+  s.preparedInputSectionStrings.clear();
+  SmallVector<std::pair<size_t, size_t>, 0> pieceRanges;
+
+  for (ELFFileBase *file : ctx.objectFiles) {
+    if (!file->atfieldIncluded || file->kind() != InputFile::ObjKind)
+      continue;
+    ArrayRef<InputSectionBase *> sections = file->getSections();
+    if (file->atfieldSectionSnapshots.size() != sections.size()) {
+      ErrAlways(ctx) << "ATField section snapshot does not match input";
+      continue;
+    }
+    for (uint32_t index = 0; index != sections.size(); ++index) {
+      InputSectionBase *section = sections[index];
+      const ATFieldInputSectionSnapshot &snapshot =
+          file->atfieldSectionSnapshots[index];
+      ATFieldInputSectionResolutionEvent event;
+      event.inputOccurrence = file->atfieldInputOccurrence;
+      event.argumentOrdinal = file->atfieldArgumentOrdinal;
+      event.groupId = file->atfieldGroupId;
+      event.inputSectionIndex = index;
+      event.present = snapshot.present;
+      event.inputSectionName = ownATFieldSectionString(s, snapshot.name);
+      event.inputSectionType = snapshot.type;
+      event.inputSectionFlags = snapshot.flags;
+      event.inputSectionSize = snapshot.size;
+      event.discardReason = snapshot.discardReason;
+      setATFieldSectionPlacement(ctx, section, event);
+
+      bool knownMetadata = isATFieldMetadataType(snapshot.type);
+      bool forcedDiscard =
+          snapshot.discarded &&
+          snapshot.discardReason != ATFieldInputSectionDiscardReason::None &&
+          (!knownMetadata ||
+           snapshot.discardReason != ATFieldInputSectionDiscardReason::Parser);
+      if (section && section == &InputSection::discarded) {
+        forcedDiscard = !knownMetadata ||
+                        snapshot.discardReason !=
+                            ATFieldInputSectionDiscardReason::Parser;
+        if (event.discardReason ==
+            ATFieldInputSectionDiscardReason::None)
+          event.discardReason = ATFieldInputSectionDiscardReason::Parser;
+      }
+      if (section && ctx.atfieldScriptDiscardedSections.contains(section)) {
+        forcedDiscard = true;
+        event.discardReason = ATFieldInputSectionDiscardReason::Script;
+      }
+
+      if (forcedDiscard) {
+        event.disposition = ATFieldInputSectionDisposition::Discarded;
+        event.discarded = true;
+      } else if (knownMetadata &&
+                 (!section || section == &InputSection::discarded ||
+                  !section->isLive() || !section->getOutputSection())) {
+        event.disposition = ATFieldInputSectionDisposition::Metadata;
+      } else if (!section) {
+        ErrAlways(ctx) << "ATField section has no unique disposition";
+        event.disposition = ATFieldInputSectionDisposition::Metadata;
+      } else if (!section->isLive() || !section->getOutputSection()) {
+        event.disposition = ATFieldInputSectionDisposition::Dead;
+        event.live = section->isLive();
+      } else {
+        event.disposition = ATFieldInputSectionDisposition::Retained;
+        event.live = true;
+      }
+      if (event.disposition == ATFieldInputSectionDisposition::Metadata)
+        event.discardReason = ATFieldInputSectionDiscardReason::None;
+      if (event.disposition == ATFieldInputSectionDisposition::Retained &&
+          isa<EhInputSection>(section))
+        event.placement = ATFieldInputSectionPlacement::Synthetic;
+      else if (event.disposition != ATFieldInputSectionDisposition::Retained)
+        event.placement = ATFieldInputSectionPlacement::None;
+
+      if (event.disposition == ATFieldInputSectionDisposition::Retained &&
+          section) {
+        OutputSection *output = section->getOutputSection();
+        event.hasOutputSection = true;
+        event.outputSectionIndex = output->sectionIndex;
+        event.outputSectionName = ownATFieldSectionString(s, output->name);
+        event.outputSectionType = output->type;
+        event.outputSectionFlags = output->flags;
+        event.outputSectionVA = output->addr;
+        event.outputSectionFileOffset = output->offset;
+        event.outputSectionSize = output->size;
+        event.outputSectionAlignment = output->addralign;
+        event.outputSectionOffset = section->getOffset(0);
+      }
+
+      size_t pieceStart = s.preparedInputSectionPieces.size();
+      bool piecesValid = true;
+      if (event.disposition != ATFieldInputSectionDisposition::Discarded &&
+          section) {
+        if (auto *merge = dyn_cast<MergeInputSection>(section))
+          piecesValid =
+              fillATFieldMergePieces(ctx, *merge, s.preparedInputSectionPieces);
+        else if (auto *eh = dyn_cast<EhInputSection>(section))
+          piecesValid =
+              fillATFieldEhPieces(ctx, *eh, s.preparedInputSectionPieces);
+      }
+      if (!piecesValid)
+        event.disposition = ATFieldInputSectionDisposition::Dead;
+      size_t pieceCount =
+          s.preparedInputSectionPieces.size() - pieceStart;
+      s.preparedInputSections.push_back(event);
+      pieceRanges.emplace_back(pieceStart, pieceCount);
+    }
+  }
+  for (size_t i = 0; i != s.preparedInputSections.size(); ++i) {
+    auto [start, count] = pieceRanges[i];
+    s.preparedInputSections[i].pieces =
+        ArrayRef<ATFieldInputSectionPiece>(
+            s.preparedInputSectionPieces)
+            .slice(start, count);
+  }
+}
+
+void lld::elf::notifyATFieldInputSections(Ctx &ctx) noexcept {
+  (void)ctx;
+  auto *observer = getATFieldInputObserver();
+  if (!observer)
+    return;
+  observer->onInputSectionsResolved(state().preparedInputSections);
 }
 
 lld::elf::ATFieldSymbolCandidateScope::ATFieldSymbolCandidateScope(

@@ -717,8 +717,11 @@ void LinkerScript::discardSynthetic(OutputSection &outCmd) {
         part.armExidx->exidxSections.end());
     for (SectionCommand *cmd : outCmd.commands)
       if (auto *isd = dyn_cast<InputSectionDescription>(cmd))
-        for (InputSectionBase *s : computeInputSections(isd, secs, outCmd))
+        for (InputSectionBase *s : computeInputSections(isd, secs, outCmd)) {
+          if (getATFieldInputObserver())
+            ctx.atfieldScriptDiscardedSections.insert(s);
           discard(*s);
+        }
   }
 }
 
@@ -745,8 +748,13 @@ void LinkerScript::processSectionCommands() {
     // The output section name `/DISCARD/' is special.
     // Any input section assigned to it is discarded.
     if (osec->name == "/DISCARD/") {
-      for (InputSectionBase *s : v)
+      for (InputSectionBase *s : v) {
+        if (getATFieldInputObserver()) {
+          ctx.atfieldExplicitSections.insert(s);
+          ctx.atfieldScriptDiscardedSections.insert(s);
+        }
         discard(*s);
+      }
       discardSynthetic(*osec);
       osec->commands.clear();
       return false;
@@ -765,6 +773,9 @@ void LinkerScript::processSectionCommands() {
       osec->commands.clear();
       return false;
     }
+    if (getATFieldInputObserver())
+      for (InputSectionBase *s : v)
+        ctx.atfieldExplicitSections.insert(s);
 
     // Handle subalign (e.g. ".foo : SUBALIGN(32) { ... }"). If subalign
     // is given, input sections are aligned to that value, whether the
@@ -1027,6 +1038,8 @@ void LinkerScript::addOrphanSections() {
 
   auto add = [&](InputSectionBase *s) {
     if (s->isLive() && !s->parent) {
+      if (getATFieldInputObserver())
+        ctx.atfieldOrphanSections.insert(s);
       orphanSections.push_back(s);
 
       StringRef name = getOutputSectionName(s);

@@ -682,6 +682,9 @@ struct Ctx : CommonLinkerContext {
   SmallVector<BitcodeFile *, 0> lazyBitcodeFiles;
   SmallVector<InputSectionBase *, 0> inputSections;
   SmallVector<EhInputSection *, 0> ehInputSections;
+  llvm::DenseSet<InputSectionBase *> atfieldExplicitSections;
+  llvm::DenseSet<InputSectionBase *> atfieldOrphanSections;
+  llvm::DenseSet<InputSectionBase *> atfieldScriptDiscardedSections;
 
   SmallVector<SymbolAux, 0> symAux;
   // Duplicate symbol candidates.

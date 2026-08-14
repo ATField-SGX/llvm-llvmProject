@@ -622,6 +622,8 @@ template <class ELFT> void ObjFile<ELFT>::parse(bool ignoreComdats) {
             Fatal(ctx) << this
                        << ": invalid section index in group: " << secIndex;
           sections[secIndex] = &InputSection::discarded;
+          if (getATFieldInputObserver())
+            atfieldComdatDiscardedSectionIndices.push_back(secIndex);
         }
       }
       continue;
@@ -786,20 +788,45 @@ void ObjFile<ELFT>::initializeSections(bool ignoreComdats,
       snapshot.type = sec.sh_type;
       snapshot.flags = sec.sh_flags;
       snapshot.size = sec.sh_size;
+      if (llvm::is_contained(atfieldComdatDiscardedSectionIndices, i)) {
+        snapshot.discarded = true;
+        snapshot.discardReason = ATFieldInputSectionDiscardReason::Comdat;
+      }
     }
   }
+  auto markATFieldDiscarded = [&](size_t index,
+                                  ATFieldInputSectionDiscardReason reason) {
+    if (!getATFieldInputObserver())
+      return;
+    auto &snapshot = atfieldSectionSnapshots[index];
+    snapshot.discarded = true;
+    if (snapshot.discardReason == ATFieldInputSectionDiscardReason::None)
+      snapshot.discardReason = reason;
+  };
+  auto targetDiscardReason = [&](size_t index) {
+    if (!getATFieldInputObserver())
+      return ATFieldInputSectionDiscardReason::Parser;
+    StringRef name = atfieldSectionSnapshots[index].name;
+    if (name == ".note.GNU-stack" || name == ".note.gnu.property" ||
+        name == ".note.GNU-split-stack" ||
+        name == ".note.GNU-no-split-stack" ||
+        name == ".note.gnu.build-id")
+      return ATFieldInputSectionDiscardReason::Target;
+    return ATFieldInputSectionDiscardReason::Parser;
+  };
   SmallVector<ArrayRef<Elf_Word>, 0> selectedGroups;
   AArch64BuildAttrSubsections aarch64BAsubSections;
   bool hasAArch64BuildAttributes = false;
   for (size_t i = 0; i != size; ++i) {
+    if (getATFieldInputObserver() &&
+        (objSections[i].sh_flags & SHF_COMPRESSED))
+      ErrAlways(ctx) << this << ": ATField compressed input section unsupported";
     if (this->sections[i] == &InputSection::discarded) {
-      if (getATFieldInputObserver())
-        atfieldSectionSnapshots[i].discarded = true;
+      markATFieldDiscarded(i, ATFieldInputSectionDiscardReason::Parser);
       continue;
     }
     const Elf_Shdr &sec = objSections[i];
     const uint32_t type = sec.sh_type;
-
     // SHF_EXCLUDE'ed sections are discarded by the linker. However,
     // if -r is given, we'll let the final link discard such sections.
     // This is compatible with GNU.
@@ -822,8 +849,7 @@ void ObjFile<ELFT>::initializeSections(bool ignoreComdats,
                        "(likely created using objcopy or ld -r)";
       }
       this->sections[i] = &InputSection::discarded;
-      if (getATFieldInputObserver())
-        atfieldSectionSnapshots[i].discarded = true;
+      markATFieldDiscarded(i, ATFieldInputSectionDiscardReason::Exclude);
       continue;
     }
 
@@ -851,8 +877,8 @@ void ObjFile<ELFT>::initializeSections(bool ignoreComdats,
     case SHT_GROUP: {
       if (!ctx.arg.relocatable)
         sections[i] = &InputSection::discarded;
-      if (getATFieldInputObserver() && sections[i] == &InputSection::discarded)
-        atfieldSectionSnapshots[i].discarded = true;
+      if (sections[i] == &InputSection::discarded)
+        markATFieldDiscarded(i, ATFieldInputSectionDiscardReason::Parser);
       StringRef signature =
           cantFail(this->getELFSyms<ELFT>()[sec.sh_info].getName(stringTable));
       ArrayRef<Elf_Word> entries =
@@ -870,7 +896,11 @@ void ObjFile<ELFT>::initializeSections(bool ignoreComdats,
     case SHT_STRTAB:
     case SHT_REL:
     case SHT_RELA:
+      break;
     case SHT_CREL:
+      if (getATFieldInputObserver())
+        ErrAlways(ctx) << this << ": ATField SHT_CREL unsupported";
+      break;
     case SHT_NULL:
       break;
     case SHT_PROGBITS:
@@ -881,9 +911,8 @@ void ObjFile<ELFT>::initializeSections(bool ignoreComdats,
     case SHT_PREINIT_ARRAY:
       this->sections[i] =
           createInputSection(i, sec, check(obj.getSectionName(sec, shstrtab)));
-      if (getATFieldInputObserver() &&
-          this->sections[i] == &InputSection::discarded)
-        atfieldSectionSnapshots[i].discarded = true;
+      if (this->sections[i] == &InputSection::discarded)
+        markATFieldDiscarded(i, targetDiscardReason(i));
       break;
     case SHT_LLVM_LTO:
       // Discard .llvm.lto in a relocatable link that does not use the bitcode.
@@ -892,17 +921,15 @@ void ObjFile<ELFT>::initializeSections(bool ignoreComdats,
       // the concatenated raw bitcode would be invalid.
       if (ctx.arg.relocatable && !ctx.arg.fatLTOObjects) {
         sections[i] = &InputSection::discarded;
-        if (getATFieldInputObserver())
-          atfieldSectionSnapshots[i].discarded = true;
+        markATFieldDiscarded(i, ATFieldInputSectionDiscardReason::Parser);
         break;
       }
       [[fallthrough]];
     default:
       this->sections[i] =
           createInputSection(i, sec, check(obj.getSectionName(sec, shstrtab)));
-      if (getATFieldInputObserver() &&
-          this->sections[i] == &InputSection::discarded)
-        atfieldSectionSnapshots[i].discarded = true;
+      if (this->sections[i] == &InputSection::discarded)
+        markATFieldDiscarded(i, targetDiscardReason(i));
       if (type == SHT_LLVM_SYMPART)
         ctx.hasSympart.store(true, std::memory_order_relaxed);
       else if (ctx.arg.rejectMismatch &&
@@ -922,8 +949,7 @@ void ObjFile<ELFT>::initializeSections(bool ignoreComdats,
   //    relocation sections until now.
   for (size_t i = 0; i != size; ++i) {
     if (this->sections[i] == &InputSection::discarded) {
-      if (getATFieldInputObserver())
-        atfieldSectionSnapshots[i].discarded = true;
+      markATFieldDiscarded(i, ATFieldInputSectionDiscardReason::Parser);
       continue;
     }
     const Elf_Shdr &sec = objSections[i];
@@ -1008,7 +1034,7 @@ void ObjFile<ELFT>::initializeSections(bool ignoreComdats,
   if (getATFieldInputObserver())
     for (size_t i = 0; i != size; ++i)
       if (this->sections[i] == &InputSection::discarded)
-        atfieldSectionSnapshots[i].discarded = true;
+        markATFieldDiscarded(i, ATFieldInputSectionDiscardReason::Parser);
 }
 
 template <typename ELFT>

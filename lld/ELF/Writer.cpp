@@ -139,6 +139,8 @@ void elf::copySectionsIntoPartitions(Ctx &ctx) {
       copy->partition = part;
       ctx.ehInputSections.push_back(copy);
     }
+    if (errCount(ctx))
+      return;
   }
 
   ctx.inputSections.insert(ctx.inputSections.end(), newSections.begin(),
@@ -359,6 +361,9 @@ template <class ELFT> void Writer<ELFT>::run() {
     checkSections();
 
   // It does not make sense try to open the file if we have error already.
+  if (errCount(ctx))
+    return;
+  prepareATFieldInputSections(ctx);
   if (errCount(ctx))
     return;
 
