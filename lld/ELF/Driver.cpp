@@ -2192,7 +2192,243 @@ void LinkerDriver::createFiles(opt::InputArgList &args) {
     case OPT_no_whole_archive:
       atfieldContext.kind = ATFieldLinkArgumentKind::WholeOff;
       break;
+    case OPT_start_lib:
+      atfieldContext.kind = ATFieldLinkArgumentKind::StartLib;
+      break;
+    case OPT_end_lib:
+      atfieldContext.kind = ATFieldLinkArgumentKind::EndLib;
+      break;
+    case OPT_script:
+    case OPT_default_script:
+      atfieldContext.kind = ATFieldLinkArgumentKind::Script;
+      break;
+    case OPT_version_script:
+      atfieldContext.kind = ATFieldLinkArgumentKind::Script;
+      atfieldContext.scriptKind = ATFieldLinkerScriptKind::Version;
+      break;
     default:
+      break;
+    }
+    switch (arg->getOption().getID()) {
+    case OPT_INPUT:
+    case OPT_library:
+    case OPT_start_group:
+    case OPT_end_group:
+    case OPT_start_lib:
+    case OPT_end_lib:
+    case OPT_whole_archive:
+    case OPT_no_whole_archive:
+    case OPT_as_needed:
+    case OPT_no_as_needed:
+    case OPT_push_state:
+    case OPT_pop_state:
+    case OPT_format:
+      atfieldContext.policy = ATFieldLinkArgumentPolicy::PreparedInput;
+      break;
+    case OPT_script:
+    case OPT_default_script:
+    case OPT_version_script:
+      atfieldContext.policy = ATFieldLinkArgumentPolicy::ReplaceScript;
+      break;
+    case OPT_Ttext:
+    case OPT_Tdata:
+    case OPT_Tbss:
+    case OPT_nostdlib:
+      atfieldContext.policy = ATFieldLinkArgumentPolicy::RetainPure;
+      break;
+    case OPT_library_path:
+    case OPT_sysroot:
+    case OPT_chroot:
+      atfieldContext.policy = ATFieldLinkArgumentPolicy::DropSearch;
+      break;
+    case OPT_o:
+    case OPT_Map:
+    case OPT_print_map:
+    case OPT_print_memory_usage:
+    case OPT_print_gc_sections:
+    case OPT_print_icf_sections:
+    case OPT_print_archive_stats:
+    case OPT_cref:
+    case OPT_dependency_file:
+    case OPT_print_symbol_order:
+    case OPT_trace:
+    case OPT_trace_symbol:
+    case OPT_time_trace_eq:
+    case OPT_time_trace_granularity:
+    case OPT_color_diagnostics:
+    case OPT_error_limit:
+    case OPT_help:
+    case OPT_v:
+    case OPT_version:
+    case OPT_verbose:
+    case OPT_visual_studio_diagnostics_format:
+      atfieldContext.policy = ATFieldLinkArgumentPolicy::ReplaceOutput;
+      break;
+    case OPT_just_symbols:
+    case OPT_in_implib:
+    case OPT_dynamic_list:
+    case OPT_export_dynamic_symbol_list:
+    case OPT_remap_inputs_file:
+    case OPT_retain_symbols_file:
+    case OPT_symbol_ordering_file:
+    case OPT_call_graph_ordering_file:
+    case OPT_lto:
+    case OPT_lto_aa_pipeline:
+    case OPT_lto_debug_pass_manager:
+    case OPT_lto_emit_asm:
+    case OPT_lto_newpm_passes:
+    case OPT_lto_O:
+    case OPT_lto_CGO:
+    case OPT_lto_partitions:
+    case OPT_lto_cs_profile_file:
+    case OPT_lto_obj_path_eq:
+    case OPT_lto_sample_profile:
+    case OPT_mllvm:
+    case OPT_plugin:
+    case OPT_plugin_opt_eq:
+    case OPT_noinhibit_exec:
+      atfieldContext.policy = ATFieldLinkArgumentPolicy::RejectExternalInput;
+      break;
+    case OPT_exclude_libs:
+    case OPT_dependent_libraries:
+    case OPT_fortran_common:
+    case OPT_warn_backrefs:
+    case OPT_warn_backrefs_exclude:
+      atfieldContext.policy =
+          ATFieldLinkArgumentPolicy::RejectArchiveSensitive;
+      break;
+    case OPT_fatal_warnings:
+    case OPT_no_fatal_warnings:
+    case OPT_no_warnings:
+    case OPT_warn_common:
+    case OPT_no_warn_common:
+    case OPT_warn_ifunc_textrel:
+    case OPT_no_warn_ifunc_textrel:
+    case OPT_warn_symbol_ordering:
+    case OPT_no_warn_symbol_ordering:
+    case OPT_warn_unresolved_symbols:
+    case OPT_auxiliary:
+    case OPT_dynamic_linker:
+    case OPT_filter:
+    case OPT_rpath:
+    case OPT_soname:
+      atfieldContext.policy = ATFieldLinkArgumentPolicy::RetainPure;
+      break;
+    case OPT_Bno_symbolic:
+    case OPT_Bsymbolic:
+    case OPT_Bsymbolic_functions:
+    case OPT_Bsymbolic_non_weak_functions:
+    case OPT_Bdynamic:
+    case OPT_Bstatic:
+    case OPT_build_id:
+    case OPT_check_sections:
+    case OPT_no_check_sections:
+    case OPT_compress_debug_sections:
+    case OPT_defsym:
+    case OPT_demangle:
+    case OPT_no_demangle:
+    case OPT_discard_all:
+    case OPT_discard_locals:
+    case OPT_discard_none:
+    case OPT_disable_new_dtags:
+    case OPT_enable_new_dtags:
+    case OPT_eh_frame_hdr:
+    case OPT_no_eh_frame_hdr:
+    case OPT_emit_relocs:
+    case OPT_export_dynamic:
+    case OPT_no_export_dynamic:
+    case OPT_entry:
+    case OPT_gc_sections:
+    case OPT_no_gc_sections:
+    case OPT_gdb_index:
+    case OPT_no_gdb_index:
+    case OPT_gnu_unique:
+    case OPT_no_gnu_unique:
+    case OPT_hash_style:
+    case OPT_icf_all:
+    case OPT_icf_safe:
+    case OPT_icf_none:
+    case OPT_image_base:
+    case OPT_init:
+    case OPT_fini:
+    case OPT_keep_unique:
+    case OPT_m:
+    case OPT_merge_exidx_entries:
+    case OPT_no_merge_exidx_entries:
+    case OPT_mmap_output_file:
+    case OPT_no_mmap_output_file:
+    case OPT_nmagic:
+    case OPT_no_nmagic:
+    case OPT_no_omagic:
+    case OPT_omagic:
+    case OPT_no_dynamic_linker:
+    case OPT_no_undefined:
+    case OPT_no_allow_shlib_undefined:
+    case OPT_allow_shlib_undefined:
+    case OPT_oformat:
+    case OPT_orphan_handling:
+    case OPT_pack_dyn_relocs:
+    case OPT_use_android_relr_tags:
+    case OPT_no_use_android_relr_tags:
+    case OPT_pic_veneer:
+    case OPT_pie:
+    case OPT_no_pie:
+    case OPT_relax:
+    case OPT_no_relax:
+    case OPT_relax_gp:
+    case OPT_no_relax_gp:
+    case OPT_rosegment:
+    case OPT_no_rosegment:
+    case OPT_section_start:
+    case OPT_shared:
+    case OPT_sort_section:
+    case OPT_strip_all:
+    case OPT_strip_debug:
+    case OPT_threads:
+    case OPT_unique:
+    case OPT_undefined:
+    case OPT_undefined_glob:
+    case OPT_unresolved_symbols:
+    case OPT_undefined_version:
+    case OPT_no_undefined_version:
+    case OPT_wrap:
+    case OPT_package_metadata:
+      atfieldContext.policy = ATFieldLinkArgumentPolicy::RetainPure;
+      break;
+    case OPT_relocatable:
+    case OPT_Ttext_segment:
+    case OPT_rsp_quoting:
+    case OPT_out_implib:
+    case OPT_reproduce:
+      atfieldContext.policy = ATFieldLinkArgumentPolicy::RejectExternalInput;
+      break;
+    case OPT_z: {
+      const StringRef value = arg->getValue();
+      static constexpr StringRef known[] = {
+          "combreloc", "copyreloc", "defs", "execstack", "force-bti",
+          "force-ibt", "global", "hazardplt", "ifunc-noplt", "initfirst",
+          "interpose", "keep-text-section-prefix", "lazy", "muldefs",
+          "nocombreloc", "nocopyreloc", "nodefaultlib", "nodelete",
+          "nodlopen", "noexecstack", "nognustack",
+          "nokeep-text-section-prefix", "nopack-relative-relocs",
+          "norelro", "noseparate-code", "nostart-stop-gc", "notext", "now",
+          "origin", "pac-plt", "pack-relative-relocs", "rel", "rela",
+          "relro", "retpolineplt", "rodynamic", "separate-code",
+          "separate-loadable-segments", "shstk", "start-stop-gc", "text",
+          "undefs", "wxneeded"};
+      bool recognized = llvm::is_contained(known, value);
+      for (const char *prefix : {"common-page-size=", "bti-report=",
+                                 "cet-report=", "dead-reloc-in-nonalloc=",
+                                 "max-page-size=", "stack-size=",
+                                 "start-stop-visibility="})
+        recognized |= value.starts_with(prefix);
+      atfieldContext.policy =
+          recognized ? ATFieldLinkArgumentPolicy::RetainPure
+                     : ATFieldLinkArgumentPolicy::RejectExternalInput;
+      break;
+    }
+    default:
+      atfieldContext.policy = ATFieldLinkArgumentPolicy::RejectExternalInput;
       break;
     }
     setATFieldArgumentContext(atfieldContext);
@@ -2301,8 +2537,32 @@ void LinkerDriver::createFiles(opt::InputArgList &args) {
       stack.pop_back();
       break;
     }
+    atfieldContext = getATFieldArgumentContext();
+    atfieldContext.wholeArchive = inWholeArchive;
+    atfieldContext.active = false;
+    setATFieldArgumentContext(atfieldContext);
+    if (auto *observer = getATFieldInputObserver()) {
+      ATFieldLinkArgumentEvent event;
+      event.argumentOrdinal = atfieldContext.argumentOrdinal;
+      event.kind = atfieldContext.kind;
+      event.inputOccurrence = atfieldContext.inputOccurrence;
+      event.archiveOccurrence = atfieldContext.archiveOccurrence;
+      event.scriptOccurrence = atfieldContext.scriptOccurrence;
+      event.groupId = atfieldContext.groupId;
+      event.wholeArchive = atfieldContext.wholeArchive;
+      event.policy = atfieldContext.policy;
+      event.argument = atfieldContext.argument;
+      event.path = atfieldContext.path;
+      event.diagnosticText = atfieldContext.diagnosticText;
+      opt::ArgStringList renderedTokens;
+      arg->render(args, renderedTokens);
+      event.tokens = renderedTokens;
+      observer->onLinkArgument(event);
+    }
     clearATFieldArgumentContext();
   }
+  if (auto *observer = getATFieldInputObserver())
+    observer->onLinkArgumentsComplete(args.size());
 
   if (defaultScript && !hasScript)
     readLinkerScript(ctx, *defaultScript);
