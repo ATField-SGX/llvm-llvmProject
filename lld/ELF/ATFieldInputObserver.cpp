@@ -104,6 +104,7 @@ void lld::elf::beginATFieldLink() noexcept {
   s.payloadIncludedEvents.clear();
   s.scriptOccurrences.clear();
   s.archiveEncounterOrdinals.clear();
+  s.payloadSnapshotNotified = false;
   s.terminalNotified = false;
 }
 ATFieldOccurrence lld::elf::ensureATFieldScriptOccurrence(
@@ -233,7 +234,6 @@ void lld::elf::notifyATFieldSymbolWinners(
                   }),
       expectedKeys.end());
   current->onExpectedSymbolWinnerKeys(expectedKeys);
-  current->onPayloadIncludedSnapshot(s.payloadIncludedEvents);
 
   llvm::SmallVector<ATFieldInputSymbolBinding, 0> bindings;
   for (ELFFileBase *file : ctx.objectFiles) {
@@ -307,6 +307,17 @@ void lld::elf::notifyATFieldPayloadIncluded(InputFile *file) noexcept {
   event.trigger = file->atfieldTrigger;
   current->onPayloadIncluded(event);
   state().payloadIncludedEvents.push_back(event);
+}
+
+void lld::elf::notifyATFieldPayloadIncludedSnapshot() noexcept {
+  auto *current = getATFieldInputObserver();
+  if (!current)
+    return;
+  auto &s = state();
+  if (s.payloadSnapshotNotified)
+    return;
+  s.payloadSnapshotNotified = true;
+  current->onPayloadIncludedSnapshot(s.payloadIncludedEvents);
 }
 
 void lld::elf::notifyATFieldParse(InputFile *file) noexcept {

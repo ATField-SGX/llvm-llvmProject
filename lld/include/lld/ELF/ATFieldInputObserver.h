@@ -305,6 +305,7 @@ struct ATFieldObserverState {
   llvm::DenseMap<uint64_t, ATFieldOccurrence> scriptOccurrences;
   llvm::DenseMap<uint64_t, uint64_t> archiveEncounterOrdinals;
   llvm::SmallVector<ATFieldPayloadIncludedEvent, 0> payloadIncludedEvents;
+  bool payloadSnapshotNotified = false;
   bool terminalNotified = false;
 };
 
@@ -387,6 +388,7 @@ void setATFieldArgumentContext(const ATFieldArgumentContext &) noexcept;
 void clearATFieldArgumentContext() noexcept;
 void notifyATFieldParse(class InputFile *) noexcept;
 void notifyATFieldPayloadIncluded(class InputFile *) noexcept;
+void notifyATFieldPayloadIncludedSnapshot() noexcept;
 void notifyATFieldLinkerScript(uint64_t, llvm::StringRef,
                                llvm::MemoryBufferRef, bool nested = false,
                                ATFieldOccurrence nestedOccurrence = 0) noexcept;

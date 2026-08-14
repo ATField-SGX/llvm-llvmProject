@@ -147,7 +147,10 @@ static bool linkImpl(ArrayRef<const char *> args,
 
   ctx.driver.linkerMain(args);
 
-  return errCount(ctx) == 0;
+  bool success = errCount(ctx) == 0;
+  if (success)
+    notifyATFieldPayloadIncludedSnapshot();
+  return success;
 }
 
 bool link(ArrayRef<const char *> args, llvm::raw_ostream &stdoutOS,
