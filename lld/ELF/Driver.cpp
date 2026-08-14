@@ -720,6 +720,7 @@ LinkerDriver::LinkerDriver(Ctx &ctx) : ctx(ctx) {}
 void LinkerDriver::linkerMain(ArrayRef<const char *> argsArr) {
   ELFOptTable parser;
   opt::InputArgList args = parser.parse(ctx, argsArr.slice(1));
+  beginATFieldLink();
 
   // Interpret these flags early because Err/Warn depend on them.
   ctx.e.errorLimit = args::getInteger(args, OPT_error_limit, 20);
@@ -2041,13 +2042,28 @@ static void readConfigs(Ctx &ctx, opt::InputArgList &args) {
     if (std::optional<MemoryBufferRef> buffer = readFile(ctx, arg->getValue()))
       readDynamicList(ctx, *buffer);
 
-  for (auto *arg : args.filtered(OPT_version_script))
+  for (auto *arg : args.filtered(OPT_version_script)) {
+    ATFieldArgumentContext context;
+    context.argumentOrdinal =
+        translateATFieldArgumentOrdinal(arg->getIndex() + 1);
+    context.kind = ATFieldLinkArgumentKind::Script;
+    context.policy = ATFieldLinkArgumentPolicy::ReplaceScript;
+    context.scriptKind = ATFieldLinkerScriptKind::Version;
+    context.scriptOccurrence =
+        ensureATFieldScriptOccurrence(context.argumentOrdinal);
+    context.groupId = ctx.driver.nextGroupId;
+    context.argument = ctx.saver.save(arg->getAsString(args));
+    context.path = arg->getValue();
+    context.diagnosticText = context.argument;
+    setATFieldArgumentContext(context);
     if (std::optional<std::string> path = searchScript(ctx, arg->getValue())) {
       if (std::optional<MemoryBufferRef> buffer = readFile(ctx, *path))
         readVersionScript(ctx, *buffer);
     } else {
       ErrAlways(ctx) << "cannot find version script " << arg->getValue();
     }
+    clearATFieldArgumentContext();
+  }
 }
 
 // Some Config members do not directly correspond to any particular
@@ -2163,7 +2179,6 @@ void LinkerDriver::createFiles(opt::InputArgList &args) {
   nextGroupId = 0;
   isInGroup = false;
   bool hasInput = false, hasScript = false;
-  beginATFieldLink();
   for (auto *arg : args) {
     ATFieldArgumentContext atfieldContext;
     atfieldContext.argumentOrdinal =
@@ -2209,6 +2224,9 @@ void LinkerDriver::createFiles(opt::InputArgList &args) {
     default:
       break;
     }
+    if (atfieldContext.kind == ATFieldLinkArgumentKind::Script)
+      atfieldContext.scriptOccurrence =
+          ensureATFieldScriptOccurrence(atfieldContext.argumentOrdinal);
     switch (arg->getOption().getID()) {
     case OPT_INPUT:
     case OPT_library:
