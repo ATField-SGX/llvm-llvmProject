@@ -252,9 +252,10 @@ void Symbol::parseSymbolVersion(Ctx &ctx) {
                    << verstr;
 }
 
-void Symbol::extract(Ctx &ctx) const {
+void Symbol::extract(Ctx &ctx, StringRef trigger) const {
   assert(file->lazy);
   file->lazy = false;
+  file->atfieldTrigger = ctx.saver.save(trigger);
   parseFile(ctx, file);
 }
 
@@ -472,7 +473,7 @@ void Symbol::resolve(Ctx &ctx, const Undefined &other) {
     // files) form group 2. E forms group 3. I think that you can see how this
     // group assignment rule simulates the traditional linker's semantics.
     bool backref = ctx.arg.warnBackrefs && file->groupId < other.file->groupId;
-    extract(ctx);
+    extract(ctx, getName());
 
     if (!ctx.arg.whyExtract.empty())
       recordWhyExtract(ctx, other.file, *file, *this);
@@ -632,7 +633,7 @@ void Symbol::resolve(Ctx &ctx, const LazySymbol &other) {
       // should be extracted as the canonical definition instead.
       ctx.backwardReferences.erase(this);
       other.overwrite(*this);
-      other.extract(ctx);
+      other.extract(ctx, getName());
     }
     return;
   }
@@ -648,7 +649,7 @@ void Symbol::resolve(Ctx &ctx, const LazySymbol &other) {
   }
 
   const InputFile *oldFile = file;
-  other.extract(ctx);
+  other.extract(ctx, getName());
   if (!ctx.arg.whyExtract.empty())
     recordWhyExtract(ctx, oldFile, *file, *this);
 }

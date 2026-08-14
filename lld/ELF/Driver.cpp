@@ -213,26 +213,47 @@ static std::tuple<ELFKind, uint16_t, uint8_t> parseEmulation(Ctx &ctx,
   return std::make_tuple(ret.first, ret.second, osabi);
 }
 
+struct ATFieldArchiveMember {
+  MemoryBufferRef buffer;
+  uint64_t childHeaderOffset = 0;
+  uint64_t size = 0;
+  uint64_t memberOrdinal = 0;
+  StringRef name;
+};
+
+struct ATFieldArchiveMembers {
+  std::vector<ATFieldArchiveMember> members;
+  uint64_t memberCount = 0;
+  bool thin = false;
+};
+
 // Returns slices of MB by parsing MB as an archive file.
 // Each slice consists of a member file in the archive.
-std::vector<std::pair<MemoryBufferRef, uint64_t>> static getArchiveMembers(
-    Ctx &ctx, MemoryBufferRef mb) {
+static ATFieldArchiveMembers getArchiveMembers(Ctx &ctx,
+                                               MemoryBufferRef mb) {
   std::unique_ptr<Archive> file =
       CHECK(Archive::create(mb),
             mb.getBufferIdentifier() + ": failed to parse archive");
 
-  std::vector<std::pair<MemoryBufferRef, uint64_t>> v;
+  ATFieldArchiveMembers result;
+  result.thin = file->isThin();
   Error err = Error::success();
   bool addToTar = file->isThin() && ctx.tar;
+  uint64_t memberOrdinal = 0;
   for (const Archive::Child &c : file->children(err)) {
+    ++result.memberCount;
     MemoryBufferRef mbref =
         CHECK(c.getMemoryBufferRef(),
               mb.getBufferIdentifier() +
                   ": could not get the buffer for a child of the archive");
+    uint64_t childHeaderOffset = c.getChildOffset();
+    uint64_t size = CHECK(c.getSize(), mb.getBufferIdentifier());
+    StringRef name = CHECK(c.getName(), mb.getBufferIdentifier());
     if (addToTar)
       ctx.tar->append(relativeToRoot(check(c.getFullName())),
                       mbref.getBuffer());
-    v.push_back(std::make_pair(mbref, c.getChildOffset()));
+    result.members.push_back(
+        {mbref, childHeaderOffset, size, memberOrdinal++, name});
   }
   if (err)
     Fatal(ctx) << mb.getBufferIdentifier()
@@ -242,29 +263,44 @@ std::vector<std::pair<MemoryBufferRef, uint64_t>> static getArchiveMembers(
   std::vector<std::unique_ptr<MemoryBuffer>> mbs = file->takeThinBuffers();
   std::move(mbs.begin(), mbs.end(), std::back_inserter(ctx.memoryBuffers));
 
-  return v;
+  return result;
 }
 
 static bool isBitcode(MemoryBufferRef mb) {
   return identify_magic(mb.getBuffer()) == llvm::file_magic::bitcode;
 }
 
-static void setATFieldDirectFileContext(InputFile *file,
-                                        ATFieldOccurrence inputOccurrence) {
+static void rejectFatLTO(Ctx &ctx, MemoryBufferRef mb, StringRef path) {
+  Expected<MemoryBufferRef> fatLTOData =
+      IRObjectFile::findBitcodeInMemBuffer(mb);
+  if (!errorToBool(fatLTOData.takeError()))
+    Fatal(ctx) << path << ": fat LTO objects are not supported";
+}
+
+static ATFieldInputKind getATFieldInputKind(const InputFile *file) {
+  if (file->kind() == InputFile::ObjKind)
+    return ATFieldInputKind::ETRel;
+  if (file->kind() == InputFile::BitcodeKind)
+    return ATFieldInputKind::Bitcode;
+  return ATFieldInputKind::Other;
+}
+
+static void setATFieldFileContext(
+    InputFile *file, ATFieldOccurrence inputOccurrence,
+    ATFieldOccurrence archiveOccurrence, ATFieldOccurrence memberOccurrence,
+    ATFieldInputInclusionReason reason, bool externalMemberBytes) {
   const ATFieldArgumentContext context = getATFieldArgumentContext();
   file->atfieldInputOccurrence = inputOccurrence;
-  file->atfieldArchiveOccurrence = 0;
-  file->atfieldMemberOccurrence = 0;
+  file->atfieldArchiveOccurrence = archiveOccurrence;
+  file->atfieldMemberOccurrence = memberOccurrence;
   file->atfieldChildHeaderOffset = 0;
   file->atfieldMemberOrdinal = 0;
   file->atfieldMemberSize = 0;
   file->atfieldArgumentOrdinal = context.argumentOrdinal;
   file->atfieldGroupId = file->groupId;
-  file->atfieldInclusionReason =
-      file->lazy ? ATFieldInputInclusionReason::Lazy
-                 : ATFieldInputInclusionReason::Direct;
+  file->atfieldInclusionReason = reason;
   file->atfieldTrigger = {};
-  file->atfieldExternalMemberBytes = false;
+  file->atfieldExternalMemberBytes = externalMemberBytes;
   file->atfieldIncluded = false;
 }
 
@@ -290,23 +326,65 @@ static void notifyATFieldDirectInput(InputFile *file, StringRef path,
 static void notifyATFieldDirectFile(InputFile *file, StringRef path) {
   if (!getATFieldInputObserver())
     return;
-  setATFieldDirectFileContext(file, nextATFieldOccurrence());
+  setATFieldFileContext(
+      file, nextATFieldOccurrence(), 0, 0,
+      file->lazy ? ATFieldInputInclusionReason::Lazy
+                 : ATFieldInputInclusionReason::Direct,
+      false);
   notifyATFieldDirectInput(file, path, file->mb);
 }
 
-bool LinkerDriver::tryAddFatLTOFile(MemoryBufferRef mb, StringRef archiveName,
-                                    uint64_t offsetInArchive, bool lazy) {
-  if (!ctx.arg.fatLTOObjects)
-    return false;
-  Expected<MemoryBufferRef> fatLTOData =
-      IRObjectFile::findBitcodeInMemBuffer(mb);
-  if (errorToBool(fatLTOData.takeError()))
-    return false;
-  auto file = std::make_unique<BitcodeFile>(ctx, *fatLTOData, archiveName,
-                                            offsetInArchive, lazy);
-  file->obj->fatLTOObject(true);
-  files.push_back(std::move(file));
-  return true;
+static void notifyATFieldArchiveEncounter(
+    StringRef path, MemoryBufferRef contents, uint64_t memberCount,
+    bool thinArchive, ATFieldOccurrence archiveOccurrence) {
+  auto *observer = getATFieldInputObserver();
+  if (!observer)
+    return;
+  ATFieldArgumentContext context = getATFieldArgumentContext();
+  context.archiveOccurrence = archiveOccurrence;
+  context.inputOccurrence = 0;
+  context.kind = ATFieldLinkArgumentKind::Archive;
+  context.path = path;
+  setATFieldArgumentContext(context);
+  ATFieldArchiveEncounterEvent event;
+  event.argumentOrdinal = context.argumentOrdinal;
+  event.archiveOccurrence = context.archiveOccurrence;
+  event.groupId = context.groupId;
+  event.wholeArchive = context.wholeArchive;
+  event.thinArchive = thinArchive;
+  event.path = path;
+  event.contents = contents;
+  event.memberCount = memberCount;
+  observer->onArchiveEncounter(event);
+}
+
+static void notifyATFieldArchiveMember(
+    const ATFieldArchiveMember &member, StringRef archivePath,
+    ATFieldOccurrence archiveOccurrence, InputFile *file, bool wholeArchive,
+    bool thinArchive) {
+  auto *observer = getATFieldInputObserver();
+  if (!observer)
+    return;
+  ATFieldArgumentContext context = getATFieldArgumentContext();
+  ATFieldArchiveMemberCandidateEvent event;
+  event.argumentOrdinal = context.argumentOrdinal;
+  event.archiveOccurrence = archiveOccurrence;
+  event.memberOccurrence = file->atfieldMemberOccurrence;
+  event.inputOccurrence = file->atfieldInputOccurrence;
+  event.groupId = file->atfieldGroupId;
+  event.wholeArchive = wholeArchive;
+  event.childHeaderOffset = member.childHeaderOffset;
+  event.memberOrdinal = member.memberOrdinal;
+  event.memberSize = member.size;
+  event.kind = getATFieldInputKind(file);
+  event.archivePath = archivePath;
+  event.memberName = member.name;
+  event.contents = member.buffer;
+  observer->onArchiveMemberCandidate(event);
+  file->atfieldChildHeaderOffset = member.childHeaderOffset;
+  file->atfieldMemberOrdinal = member.memberOrdinal;
+  file->atfieldMemberSize = member.size;
+  file->atfieldExternalMemberBytes = thinArchive;
 }
 
 // Opens a file and create a file object. Path has to be resolved already.
@@ -328,19 +406,54 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
     readLinkerScript(ctx, mbref);
     return;
   case file_magic::archive: {
-    auto members = getArchiveMembers(ctx, mbref);
+    ATFieldArgumentContext archiveContext = getATFieldArgumentContext();
+    const uint64_t archiveOccurrence =
+        getATFieldInputObserver()
+            ? translateATFieldArchiveOccurrence(
+                  nextATFieldOccurrence(), archiveContext.argumentOrdinal,
+                  nextATFieldArchiveEncounterOrdinal(
+                      archiveContext.argumentOrdinal))
+            : 0;
+    ATFieldArchiveMembers archive = getArchiveMembers(ctx, mbref);
+    notifyATFieldArchiveEncounter(path, mbref, archive.memberCount,
+                                  archive.thin, archiveOccurrence);
     if (inWholeArchive) {
-      for (const std::pair<MemoryBufferRef, uint64_t> &p : members) {
-        if (isBitcode(p.first))
-          files.push_back(std::make_unique<BitcodeFile>(ctx, p.first, path,
-                                                        p.second, false));
-        else if (!tryAddFatLTOFile(p.first, path, p.second, false))
-          files.push_back(createObjFile(ctx, p.first, path));
+      for (const ATFieldArchiveMember &member : archive.members) {
+        auto magic = identify_magic(member.buffer.getBuffer());
+        InputFile *file = nullptr;
+        if (isBitcode(member.buffer)) {
+          file = new BitcodeFile(ctx, member.buffer, path,
+                                 member.childHeaderOffset, false);
+        } else if (magic == file_magic::elf_relocatable) {
+          rejectFatLTO(ctx, member.buffer, path);
+          files.push_back(
+              createObjFile(ctx, member.buffer, path, /*lazy=*/false));
+          file = files.back().get();
+        }
+        if (!file)
+          continue;
+        if (isBitcode(member.buffer))
+          files.push_back(std::unique_ptr<InputFile>(file));
+        ATFieldOccurrence memberOccurrence =
+            getATFieldInputObserver()
+                ? translateATFieldArchiveMemberOccurrence(
+                      nextATFieldOccurrence(), archiveOccurrence,
+                      archiveContext.argumentOrdinal, member.childHeaderOffset,
+                      member.memberOrdinal, archive.thin)
+                : 0;
+        ATFieldOccurrence inputOccurrence =
+            getATFieldInputObserver() ? nextATFieldOccurrence() : 0;
+        setATFieldFileContext(file, inputOccurrence, archiveOccurrence,
+                              memberOccurrence,
+                              ATFieldInputInclusionReason::WholeArchive,
+                              archive.thin);
+        notifyATFieldArchiveMember(member, path, archiveOccurrence, file, true,
+                                   archive.thin);
       }
       return;
     }
 
-    archiveFiles.emplace_back(path, members.size());
+    archiveFiles.emplace_back(path, archive.memberCount);
 
     // Handle archives and --start-lib/--end-lib using the same code path. This
     // scans all the ELF relocatable object files and bitcode files in the
@@ -355,18 +468,41 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
     // All files within the archive get the same group ID to allow mutual
     // references for --warn-backrefs.
     SaveAndRestore saved(isInGroup, true);
-    for (const std::pair<MemoryBufferRef, uint64_t> &p : members) {
-      auto magic = identify_magic(p.first.getBuffer());
+    for (const ATFieldArchiveMember &member : archive.members) {
+      auto magic = identify_magic(member.buffer.getBuffer());
+      InputFile *file = nullptr;
+      std::unique_ptr<InputFile> owned;
       if (magic == file_magic::elf_relocatable) {
-        if (!tryAddFatLTOFile(p.first, path, p.second, true))
-          files.push_back(createObjFile(ctx, p.first, path, true));
-      } else if (magic == file_magic::bitcode)
-        files.push_back(
-            std::make_unique<BitcodeFile>(ctx, p.first, path, p.second, true));
-      else
+        rejectFatLTO(ctx, member.buffer, path);
+        owned = createObjFile(ctx, member.buffer, path, true);
+        file = owned.get();
+      } else if (magic == file_magic::bitcode) {
+        owned = std::make_unique<BitcodeFile>(
+            ctx, member.buffer, path, member.childHeaderOffset, true);
+        file = owned.get();
+      } else {
         Warn(ctx) << path << ": archive member '"
-                  << p.first.getBufferIdentifier()
+                  << member.buffer.getBufferIdentifier()
                   << "' is neither ET_REL nor LLVM bitcode";
+      }
+      if (file) {
+        ATFieldOccurrence memberOccurrence =
+            getATFieldInputObserver()
+                ? translateATFieldArchiveMemberOccurrence(
+                      nextATFieldOccurrence(), archiveOccurrence,
+                      archiveContext.argumentOrdinal, member.childHeaderOffset,
+                      member.memberOrdinal, archive.thin)
+                : 0;
+        ATFieldOccurrence inputOccurrence =
+            getATFieldInputObserver() ? nextATFieldOccurrence() : 0;
+        setATFieldFileContext(file, inputOccurrence, archiveOccurrence,
+                              memberOccurrence,
+                              ATFieldInputInclusionReason::Lazy,
+                              archive.thin);
+        notifyATFieldArchiveMember(member, path, archiveOccurrence, file, false,
+                                   archive.thin);
+        files.push_back(std::move(owned));
+      }
     }
     if (!saved.get())
       ++nextGroupId;
@@ -394,8 +530,8 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
     notifyATFieldDirectFile(files.back().get(), path);
     break;
   case file_magic::elf_relocatable:
-    if (!tryAddFatLTOFile(mbref, "", 0, inLib))
-      files.push_back(createObjFile(ctx, mbref, "", inLib));
+    rejectFatLTO(ctx, mbref, path);
+    files.push_back(createObjFile(ctx, mbref, "", inLib));
     notifyATFieldDirectFile(files.back().get(), path);
     break;
   default:
@@ -2728,7 +2864,7 @@ static void handleUndefined(Ctx &ctx, Symbol *sym, const char *option) {
 
   if (!sym->isLazy())
     return;
-  sym->extract(ctx);
+  sym->extract(ctx, sym->getName());
   if (!ctx.arg.whyExtract.empty())
     ctx.whyExtractRecords.emplace_back(option, sym->file, *sym);
 }
@@ -2759,7 +2895,7 @@ static void handleLibcall(Ctx &ctx, StringRef name) {
   if (sym && sym->isLazy() && isa<BitcodeFile>(sym->file)) {
     if (!ctx.arg.whyExtract.empty())
       ctx.whyExtractRecords.emplace_back("<libcall>", sym->file, *sym);
-    sym->extract(ctx);
+    sym->extract(ctx, sym->getName());
   }
 }
 

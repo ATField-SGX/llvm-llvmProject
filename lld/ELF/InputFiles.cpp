@@ -315,6 +315,9 @@ template <class ELFT> static void doParseFile(Ctx &ctx, InputFile *file) {
     return;
   }
 
+  notifyATFieldPayloadIncluded(file);
+  notifyATFieldParse(file);
+
   if (ctx.arg.trace)
     Msg(ctx) << file;
 
@@ -773,12 +776,27 @@ void ObjFile<ELFT>::initializeSections(bool ignoreComdats,
   ArrayRef<Elf_Shdr> objSections = getELFShdrs<ELFT>();
   StringRef shstrtab = CHECK2(obj.getSectionStringTable(objSections), this);
   uint64_t size = objSections.size();
+  if (getATFieldInputObserver()) {
+    atfieldSectionSnapshots.resize(size);
+    for (size_t i = 0; i != size; ++i) {
+      const Elf_Shdr &sec = objSections[i];
+      auto &snapshot = atfieldSectionSnapshots[i];
+      snapshot.present = true;
+      snapshot.name = check(obj.getSectionName(sec, shstrtab));
+      snapshot.type = sec.sh_type;
+      snapshot.flags = sec.sh_flags;
+      snapshot.size = sec.sh_size;
+    }
+  }
   SmallVector<ArrayRef<Elf_Word>, 0> selectedGroups;
   AArch64BuildAttrSubsections aarch64BAsubSections;
   bool hasAArch64BuildAttributes = false;
   for (size_t i = 0; i != size; ++i) {
-    if (this->sections[i] == &InputSection::discarded)
+    if (this->sections[i] == &InputSection::discarded) {
+      if (getATFieldInputObserver())
+        atfieldSectionSnapshots[i].discarded = true;
       continue;
+    }
     const Elf_Shdr &sec = objSections[i];
     const uint32_t type = sec.sh_type;
 
@@ -804,6 +822,8 @@ void ObjFile<ELFT>::initializeSections(bool ignoreComdats,
                        "(likely created using objcopy or ld -r)";
       }
       this->sections[i] = &InputSection::discarded;
+      if (getATFieldInputObserver())
+        atfieldSectionSnapshots[i].discarded = true;
       continue;
     }
 
@@ -831,6 +851,8 @@ void ObjFile<ELFT>::initializeSections(bool ignoreComdats,
     case SHT_GROUP: {
       if (!ctx.arg.relocatable)
         sections[i] = &InputSection::discarded;
+      if (getATFieldInputObserver() && sections[i] == &InputSection::discarded)
+        atfieldSectionSnapshots[i].discarded = true;
       StringRef signature =
           cantFail(this->getELFSyms<ELFT>()[sec.sh_info].getName(stringTable));
       ArrayRef<Elf_Word> entries =
@@ -859,6 +881,9 @@ void ObjFile<ELFT>::initializeSections(bool ignoreComdats,
     case SHT_PREINIT_ARRAY:
       this->sections[i] =
           createInputSection(i, sec, check(obj.getSectionName(sec, shstrtab)));
+      if (getATFieldInputObserver() &&
+          this->sections[i] == &InputSection::discarded)
+        atfieldSectionSnapshots[i].discarded = true;
       break;
     case SHT_LLVM_LTO:
       // Discard .llvm.lto in a relocatable link that does not use the bitcode.
@@ -867,12 +892,17 @@ void ObjFile<ELFT>::initializeSections(bool ignoreComdats,
       // the concatenated raw bitcode would be invalid.
       if (ctx.arg.relocatable && !ctx.arg.fatLTOObjects) {
         sections[i] = &InputSection::discarded;
+        if (getATFieldInputObserver())
+          atfieldSectionSnapshots[i].discarded = true;
         break;
       }
       [[fallthrough]];
     default:
       this->sections[i] =
           createInputSection(i, sec, check(obj.getSectionName(sec, shstrtab)));
+      if (getATFieldInputObserver() &&
+          this->sections[i] == &InputSection::discarded)
+        atfieldSectionSnapshots[i].discarded = true;
       if (type == SHT_LLVM_SYMPART)
         ctx.hasSympart.store(true, std::memory_order_relaxed);
       else if (ctx.arg.rejectMismatch &&
@@ -891,8 +921,11 @@ void ObjFile<ELFT>::initializeSections(bool ignoreComdats,
   //    section that has not yet been created. For simplicity, delay creation of
   //    relocation sections until now.
   for (size_t i = 0; i != size; ++i) {
-    if (this->sections[i] == &InputSection::discarded)
+    if (this->sections[i] == &InputSection::discarded) {
+      if (getATFieldInputObserver())
+        atfieldSectionSnapshots[i].discarded = true;
       continue;
+    }
     const Elf_Shdr &sec = objSections[i];
 
     if (isStaticRelSecType(sec.sh_type)) {
@@ -972,6 +1005,10 @@ void ObjFile<ELFT>::initializeSections(bool ignoreComdats,
 
   for (ArrayRef<Elf_Word> entries : selectedGroups)
     handleSectionGroup<ELFT>(this->sections, entries);
+  if (getATFieldInputObserver())
+    for (size_t i = 0; i != size; ++i)
+      if (this->sections[i] == &InputSection::discarded)
+        atfieldSectionSnapshots[i].discarded = true;
 }
 
 template <typename ELFT>

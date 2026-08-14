@@ -192,8 +192,6 @@ private:
   void inferMachineType();
   template <class ELFT> void link(llvm::opt::InputArgList &args);
   template <class ELFT> void compileBitcodeFiles(bool skipLinkedOutput);
-  bool tryAddFatLTOFile(MemoryBufferRef mb, StringRef archiveName,
-                        uint64_t offsetInArchive, bool lazy);
   // True if we are in --whole-archive and --no-whole-archive.
   bool inWholeArchive = false;
 
