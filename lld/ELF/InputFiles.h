@@ -10,6 +10,7 @@
 #define LLD_ELF_INPUT_FILES_H
 
 #include "Config.h"
+#include "lld/ELF/ATFieldInputObserver.h"
 #include "Symbols.h"
 #include "lld/Common/ErrorHandler.h"
 #include "lld/Common/LLVM.h"
@@ -143,6 +144,22 @@ public:
   // True if this is a relocatable object file/bitcode file in an ar archive
   // or between --start-lib and --end-lib.
   bool lazy = false;
+
+  ATFieldOccurrence atfieldInputOccurrence = 0;
+  ATFieldOccurrence atfieldArchiveOccurrence = 0;
+  ATFieldOccurrence atfieldMemberOccurrence = 0;
+  uint64_t atfieldChildHeaderOffset = 0;
+  uint64_t atfieldMemberOrdinal = 0;
+  uint64_t atfieldMemberSize = 0;
+  uint64_t atfieldArgumentOrdinal = 0;
+  uint32_t atfieldGroupId = 0;
+  ATFieldInputInclusionReason atfieldInclusionReason =
+      ATFieldInputInclusionReason::Direct;
+  StringRef atfieldTrigger;
+  uint64_t atfieldPayloadOrdinal = 0;
+  bool atfieldExternalMemberBytes = false;
+  bool atfieldIncluded = false;
+  SmallVector<ATFieldInputSectionSnapshot, 0> atfieldSectionSnapshots;
 
   // True if this is an argument for --just-symbols. Usually false.
   bool justSymbols = false;

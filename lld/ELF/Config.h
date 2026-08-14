@@ -11,6 +11,7 @@
 
 #include "lld/Common/CommonLinkerContext.h"
 #include "lld/Common/ErrorHandler.h"
+#include "lld/ELF/ATFieldInputObserver.h"
 #include "llvm/ADT/CachedHashString.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/MapVector.h"
@@ -626,6 +627,7 @@ struct Ctx : CommonLinkerContext {
   std::vector<Partition> partitions;
 
   InStruct in;
+  ATFieldObserverState atfieldObserver;
 
   // Some linker-generated symbols need to be created as
   // Defined symbols.
