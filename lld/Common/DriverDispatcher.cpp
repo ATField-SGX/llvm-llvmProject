@@ -136,17 +136,17 @@ static Flavor parseFlavor(llvm::SmallVectorImpl<const char *> &argsV) {
   return f;
 }
 
-static Driver whichDriver(llvm::SmallVectorImpl<const char *> &argsV,
-                          llvm::ArrayRef<DriverDef> drivers) {
+static DriverDef whichDriver(llvm::SmallVectorImpl<const char *> &argsV,
+                             llvm::ArrayRef<DriverDef> drivers) {
   Flavor f = parseFlavor(argsV);
   auto it =
       llvm::find_if(drivers, [=](auto &driverdef) { return driverdef.f == f; });
-  if (it == drivers.end()) {
-    // Driver is invalid or not available in this build.
-    return [](llvm::ArrayRef<const char *>, llvm::raw_ostream &,
-              llvm::raw_ostream &, bool, bool) { return false; };
-  }
-  return it->d;
+  if (it != drivers.end())
+    return *it;
+  // Driver is invalid or not available in this build.
+  return {Invalid,
+          [](llvm::ArrayRef<const char *>, llvm::raw_ostream &,
+             llvm::raw_ostream &, bool, bool) { return false; }};
 }
 
 namespace lld {
@@ -158,9 +158,14 @@ int unsafeLldMain(llvm::ArrayRef<const char *> args,
                   llvm::raw_ostream &stdoutOS, llvm::raw_ostream &stderrOS,
                   llvm::ArrayRef<DriverDef> drivers, bool exitEarly) {
   SmallVector<const char *, 256> argsV(args);
-  Driver d = whichDriver(argsV, drivers);
+  DriverDef driver = whichDriver(argsV, drivers);
   // Run the driver. If an error occurs, false will be returned.
-  int r = !d(argsV, stdoutOS, stderrOS, exitEarly, inTestOutputDisabled);
+  bool success = driver.dc
+                     ? driver.dc(argsV, stdoutOS, stderrOS, exitEarly,
+                                 inTestOutputDisabled, driver.userData)
+                     : driver.d(argsV, stdoutOS, stderrOS, exitEarly,
+                                inTestOutputDisabled);
+  int r = !success;
   // At this point 'r' is either 1 for error, and 0 for no error.
 
   // Call exit() if we can to avoid calling destructors.

@@ -24,10 +24,15 @@ enum Flavor {
 
 using Driver = bool (*)(llvm::ArrayRef<const char *>, llvm::raw_ostream &,
                         llvm::raw_ostream &, bool, bool);
+using DriverWithContext =
+    bool (*)(llvm::ArrayRef<const char *>, llvm::raw_ostream &,
+             llvm::raw_ostream &, bool, bool, void *);
 
 struct DriverDef {
   Flavor f;
   Driver d;
+  DriverWithContext dc = nullptr;
+  void *userData = nullptr;
 };
 
 struct Result {

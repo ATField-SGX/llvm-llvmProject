@@ -24,6 +24,7 @@
 
 #include "Driver.h"
 #include "Config.h"
+#include "lld/ELF/ATFieldInputObserver.h"
 #include "ICF.h"
 #include "InputFiles.h"
 #include "InputSection.h"
@@ -115,12 +116,19 @@ llvm::raw_fd_ostream Ctx::openAuxiliaryFile(llvm::StringRef filename,
 
 namespace lld {
 namespace elf {
-bool link(ArrayRef<const char *> args, llvm::raw_ostream &stdoutOS,
-          llvm::raw_ostream &stderrOS, bool exitEarly, bool disableOutput) {
+static bool linkImpl(ArrayRef<const char *> args,
+                     llvm::raw_ostream &stdoutOS,
+                     llvm::raw_ostream &stderrOS, bool exitEarly,
+                     bool disableOutput,
+                     const ATFieldLinkContext *atfieldContext) {
   // This driver-specific context will be freed later by unsafeLldMain().
   auto *context = new Ctx;
   Ctx &ctx = *context;
 
+  if (atfieldContext) {
+    setATFieldInputObserver(atfieldContext->observer);
+    setATFieldPreparedInputProvider(atfieldContext->provider);
+  }
   context->e.initialize(stdoutOS, stderrOS, exitEarly, disableOutput);
   context->e.logName = args::getFilenameWithoutExe(args[0]);
   context->e.errorLimitExceededMsg =
@@ -140,6 +148,19 @@ bool link(ArrayRef<const char *> args, llvm::raw_ostream &stdoutOS,
   ctx.driver.linkerMain(args);
 
   return errCount(ctx) == 0;
+}
+
+bool link(ArrayRef<const char *> args, llvm::raw_ostream &stdoutOS,
+          llvm::raw_ostream &stderrOS, bool exitEarly, bool disableOutput) {
+  return linkImpl(args, stdoutOS, stderrOS, exitEarly, disableOutput, nullptr);
+}
+
+bool linkWithATField(ArrayRef<const char *> args,
+                     llvm::raw_ostream &stdoutOS,
+                     llvm::raw_ostream &stderrOS, bool exitEarly,
+                     bool disableOutput, void *userData) {
+  return linkImpl(args, stdoutOS, stderrOS, exitEarly, disableOutput,
+                  static_cast<const ATFieldLinkContext *>(userData));
 }
 } // namespace elf
 } // namespace lld
@@ -226,6 +247,51 @@ std::vector<std::pair<MemoryBufferRef, uint64_t>> static getArchiveMembers(
 
 static bool isBitcode(MemoryBufferRef mb) {
   return identify_magic(mb.getBuffer()) == llvm::file_magic::bitcode;
+}
+
+static void setATFieldDirectFileContext(InputFile *file,
+                                        ATFieldOccurrence inputOccurrence) {
+  const ATFieldArgumentContext context = getATFieldArgumentContext();
+  file->atfieldInputOccurrence = inputOccurrence;
+  file->atfieldArchiveOccurrence = 0;
+  file->atfieldMemberOccurrence = 0;
+  file->atfieldChildHeaderOffset = 0;
+  file->atfieldMemberOrdinal = 0;
+  file->atfieldMemberSize = 0;
+  file->atfieldArgumentOrdinal = context.argumentOrdinal;
+  file->atfieldGroupId = file->groupId;
+  file->atfieldInclusionReason =
+      file->lazy ? ATFieldInputInclusionReason::Lazy
+                 : ATFieldInputInclusionReason::Direct;
+  file->atfieldTrigger = {};
+  file->atfieldExternalMemberBytes = false;
+  file->atfieldIncluded = false;
+}
+
+static void notifyATFieldDirectInput(InputFile *file, StringRef path,
+                                     MemoryBufferRef contents) {
+  auto *observer = getATFieldInputObserver();
+  if (!observer)
+    return;
+  const ATFieldArgumentContext context = getATFieldArgumentContext();
+  ATFieldDirectInputAdmissionEvent event;
+  event.argumentOrdinal = context.argumentOrdinal;
+  event.inputOccurrence = file->atfieldInputOccurrence;
+  event.groupId = file->atfieldGroupId;
+  event.path = path;
+  event.contents = contents;
+  observer->onDirectInputAdmission(event);
+  ATFieldArgumentContext updated = context;
+  updated.inputOccurrence = event.inputOccurrence;
+  updated.groupId = event.groupId;
+  setATFieldArgumentContext(updated);
+}
+
+static void notifyATFieldDirectFile(InputFile *file, StringRef path) {
+  if (!getATFieldInputObserver())
+    return;
+  setATFieldDirectFileContext(file, nextATFieldOccurrence());
+  notifyATFieldDirectInput(file, path, file->mb);
 }
 
 bool LinkerDriver::tryAddFatLTOFile(MemoryBufferRef mb, StringRef archiveName,
@@ -325,10 +391,12 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
   }
   case file_magic::bitcode:
     files.push_back(std::make_unique<BitcodeFile>(ctx, mbref, "", 0, inLib));
+    notifyATFieldDirectFile(files.back().get(), path);
     break;
   case file_magic::elf_relocatable:
     if (!tryAddFatLTOFile(mbref, "", 0, inLib))
       files.push_back(createObjFile(ctx, mbref, "", inLib));
+    notifyATFieldDirectFile(files.back().get(), path);
     break;
   default:
     ErrAlways(ctx) << path << ": unknown file type";
@@ -2095,7 +2163,39 @@ void LinkerDriver::createFiles(opt::InputArgList &args) {
   nextGroupId = 0;
   isInGroup = false;
   bool hasInput = false, hasScript = false;
+  beginATFieldLink();
   for (auto *arg : args) {
+    ATFieldArgumentContext atfieldContext;
+    atfieldContext.argumentOrdinal =
+        translateATFieldArgumentOrdinal(arg->getIndex() + 1);
+    atfieldContext.groupId = nextGroupId;
+    atfieldContext.wholeArchive = inWholeArchive;
+    atfieldContext.active = true;
+    atfieldContext.argument = ctx.saver.save(arg->getAsString(args));
+    if (arg->getNumValues() != 0)
+      atfieldContext.path = arg->getValue(0);
+    atfieldContext.diagnosticText = atfieldContext.argument;
+    switch (arg->getOption().getID()) {
+    case OPT_INPUT:
+    case OPT_library:
+      atfieldContext.kind = ATFieldLinkArgumentKind::DirectInput;
+      break;
+    case OPT_start_group:
+      atfieldContext.kind = ATFieldLinkArgumentKind::StartGroup;
+      break;
+    case OPT_end_group:
+      atfieldContext.kind = ATFieldLinkArgumentKind::EndGroup;
+      break;
+    case OPT_whole_archive:
+      atfieldContext.kind = ATFieldLinkArgumentKind::WholeOn;
+      break;
+    case OPT_no_whole_archive:
+      atfieldContext.kind = ATFieldLinkArgumentKind::WholeOff;
+      break;
+    default:
+      break;
+    }
+    setATFieldArgumentContext(atfieldContext);
     switch (arg->getOption().getID()) {
     case OPT_library:
       addLibrary(arg->getValue());
@@ -2201,6 +2301,7 @@ void LinkerDriver::createFiles(opt::InputArgList &args) {
       stack.pop_back();
       break;
     }
+    clearATFieldArgumentContext();
   }
 
   if (defaultScript && !hasScript)

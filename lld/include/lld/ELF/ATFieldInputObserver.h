@@ -15,6 +15,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/raw_ostream.h"
 #include <cstdint>
 #include <vector>
 
@@ -331,6 +332,10 @@ public:
   virtual void onInputSymbolBindings(
       llvm::ArrayRef<ATFieldInputSymbolBinding>) {}
 };
+struct ATFieldLinkContext {
+  ATFieldInputObserver *observer = nullptr;
+  ATFieldPreparedInputProvider *provider = nullptr;
+};
 ATFieldInputObserver *setATFieldInputObserver(
     ATFieldInputObserver *) noexcept;
 ATFieldInputObserver *getATFieldInputObserver() noexcept;
@@ -395,6 +400,9 @@ void noteATFieldSymbolWinner(Symbol *) noexcept;
 bool getATFieldSymbolWinner(Symbol *, ATFieldOccurrence &, uint64_t &,
                             uint32_t &) noexcept;
 void notifyATFieldSymbolWinners(Ctx &, llvm::ArrayRef<Symbol *>) noexcept;
+
+bool linkWithATField(llvm::ArrayRef<const char *>, llvm::raw_ostream &,
+                     llvm::raw_ostream &, bool, bool, void *);
 
 } // namespace lld::elf
 
