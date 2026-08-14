@@ -21,6 +21,7 @@
 #include "SymbolTable.h"
 #include "Symbols.h"
 #include "Target.h"
+#include "lld/ELF/ATFieldInputObserver.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSwitch.h"
@@ -45,7 +46,9 @@ using namespace lld::elf;
 namespace {
 class ScriptParser final : ScriptLexer {
 public:
-  ScriptParser(Ctx &ctx, MemoryBufferRef mb) : ScriptLexer(ctx, mb), ctx(ctx) {}
+  ScriptParser(Ctx &ctx, MemoryBufferRef mb) : ScriptLexer(ctx, mb), ctx(ctx) {
+    scriptContexts.push_back({mb, getATFieldArgumentContext()});
+  }
 
   void readLinkerScript();
   void readVersionScript();
@@ -53,6 +56,8 @@ public:
   void readDefsym();
 
 private:
+  ATFieldArgumentContext currentScriptContext();
+  void rememberScriptContext(MemoryBufferRef mb);
   void addFile(StringRef path);
 
   void readAsNeeded();
@@ -129,6 +134,9 @@ private:
   // If we are currently parsing a PROVIDE|PROVIDE_HIDDEN command,
   // then this member is set to the PROVIDE symbol name.
   std::optional<llvm::StringRef> activeProvideSym;
+
+  SmallVector<std::pair<MemoryBufferRef, ATFieldArgumentContext>, 4>
+      scriptContexts;
 };
 } // namespace
 
@@ -136,6 +144,18 @@ static StringRef unquote(StringRef s) {
   if (s.starts_with("\""))
     return s.substr(1, s.size() - 2);
   return s;
+}
+
+ATFieldArgumentContext ScriptParser::currentScriptContext() {
+  MemoryBufferRef current = getCurrentMB();
+  for (const auto &[mb, context] : scriptContexts)
+    if (mb.getBuffer().data() == current.getBuffer().data())
+      return context;
+  llvm_unreachable("current linker script has no ATField context");
+}
+
+void ScriptParser::rememberScriptContext(MemoryBufferRef mb) {
+  scriptContexts.push_back({mb, getATFieldArgumentContext()});
 }
 
 // Some operations only support one non absolute value. Move the
@@ -399,11 +419,38 @@ void ScriptParser::readInclude() {
     return;
   }
 
+  ATFieldArgumentContext context = currentScriptContext();
+  setATFieldArgumentContext(context);
+  if (auto *provider = getATFieldPreparedInputProvider()) {
+    auto replacement = provider->provideNestedLinkerScript(
+        context.argumentOrdinal, context.scriptOccurrence);
+    if (!replacement) {
+      fatal("prepared nested linker script provider failed: " +
+            toString(replacement.takeError()));
+      return;
+    }
+    if (replacement->replaced) {
+      notifyATFieldLinkerScript(context.argumentOrdinal,
+                                replacement->contents.getBufferIdentifier(),
+                                replacement->contents, true,
+                                replacement->scriptOccurrence);
+      rememberScriptContext(replacement->contents);
+      buffers.push_back(curBuf);
+      curBuf = Buffer(ctx, replacement->contents);
+      mbs.push_back(replacement->contents);
+      setATFieldArgumentContext(context);
+      return;
+    }
+  }
   if (std::optional<std::string> path = searchScript(ctx, name)) {
     if (std::optional<MemoryBufferRef> mb = readFile(ctx, *path)) {
+      notifyATFieldLinkerScript(context.argumentOrdinal,
+                                mb->getBufferIdentifier(), *mb, true);
+      rememberScriptContext(*mb);
       buffers.push_back(curBuf);
       curBuf = Buffer(ctx, *mb);
       mbs.push_back(*mb);
+      setATFieldArgumentContext(context);
     }
     return;
   }
@@ -1899,13 +1946,25 @@ void ScriptParser::readMemoryAttributes(uint32_t &flags, uint32_t &invFlags,
 void elf::readLinkerScript(Ctx &ctx, MemoryBufferRef mb) {
   llvm::TimeTraceScope timeScope("Read linker script",
                                  mb.getBufferIdentifier());
+  ATFieldArgumentContext context = getATFieldArgumentContext();
+  context.scriptKind = ATFieldLinkerScriptKind::Linker;
+  setATFieldArgumentContext(context);
+  notifyATFieldLinkerScript(context.argumentOrdinal, mb.getBufferIdentifier(),
+                            mb);
   ScriptParser(ctx, mb).readLinkerScript();
+  setATFieldArgumentContext(context);
 }
 
 void elf::readVersionScript(Ctx &ctx, MemoryBufferRef mb) {
   llvm::TimeTraceScope timeScope("Read version script",
                                  mb.getBufferIdentifier());
+  ATFieldArgumentContext context = getATFieldArgumentContext();
+  context.scriptKind = ATFieldLinkerScriptKind::Version;
+  setATFieldArgumentContext(context);
+  notifyATFieldLinkerScript(context.argumentOrdinal, mb.getBufferIdentifier(),
+                            mb);
   ScriptParser(ctx, mb).readVersionScript();
+  setATFieldArgumentContext(context);
 }
 
 void elf::readDynamicList(Ctx &ctx, MemoryBufferRef mb) {
