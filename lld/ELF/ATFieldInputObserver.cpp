@@ -88,6 +88,19 @@ uint64_t lld::elf::translateATFieldArchiveMemberOccurrence(
           toString(translated.takeError()));
   return *translated;
 }
+uint64_t lld::elf::translateATFieldInputOccurrence(
+    uint64_t currentOccurrence,
+    const ATFieldPreparedInputKey &key) noexcept {
+  auto *provider = getATFieldPreparedInputProvider();
+  if (!provider)
+    return currentOccurrence;
+  llvm::Expected<uint64_t> translated =
+      provider->translateInputOccurrence(currentOccurrence, key);
+  if (!translated)
+    fatal("prepared input occurrence translation failed: " +
+          toString(translated.takeError()));
+  return *translated;
+}
 uint64_t lld::elf::nextATFieldArchiveEncounterOrdinal(
     uint64_t argumentOrdinal) noexcept {
   return state().archiveEncounterOrdinals[argumentOrdinal]++;
@@ -107,13 +120,11 @@ void lld::elf::beginATFieldLink() noexcept {
   s.winners.clear();
   s.canonicalTargetTokens.clear();
   s.nextCanonicalTargetToken = 1;
-  s.payloadIncludedEvents.clear();
   s.preparedInputSections.clear();
   s.preparedInputSectionPieces.clear();
   s.preparedInputSectionStrings.clear();
   s.scriptOccurrences.clear();
   s.archiveEncounterOrdinals.clear();
-  s.payloadSnapshotNotified = false;
 }
 ATFieldOccurrence lld::elf::ensureATFieldScriptOccurrence(
     uint64_t argumentOrdinal) noexcept {
@@ -527,7 +538,6 @@ void lld::elf::notifyATFieldSymbolWinners(Ctx &ctx) noexcept {
     for (Symbol *symbol : file->getSymbols())
       if (symbol && seen.insert(symbol).second)
         symbols.push_back(symbol);
-  llvm::SmallVector<ATFieldSymbolWinnerKey, 0> expectedKeys;
   for (Symbol *symbol : symbols) {
     auto it = s.winners.find(symbol);
     if (it == s.winners.end() || !isATFieldPublishedWinner(symbol))
@@ -551,25 +561,7 @@ void lld::elf::notifyATFieldSymbolWinners(Ctx &ctx) noexcept {
     event.weak = winner.weak;
     event.comdat = winner.comdat;
     current->onSymbolWinner(event);
-    expectedKeys.push_back(
-        {winner.file->atfieldInputOccurrence, winner.inputSymbolIndex});
   }
-  std::sort(expectedKeys.begin(), expectedKeys.end(),
-            [](const ATFieldSymbolWinnerKey &a,
-               const ATFieldSymbolWinnerKey &b) {
-              if (a.inputOccurrence != b.inputOccurrence)
-                return a.inputOccurrence < b.inputOccurrence;
-              return a.inputSymbolIndex < b.inputSymbolIndex;
-            });
-  expectedKeys.erase(
-      std::unique(expectedKeys.begin(), expectedKeys.end(),
-                  [](const ATFieldSymbolWinnerKey &a,
-                     const ATFieldSymbolWinnerKey &b) {
-                    return a.inputOccurrence == b.inputOccurrence &&
-                           a.inputSymbolIndex == b.inputSymbolIndex;
-                  }),
-      expectedKeys.end());
-  current->onExpectedSymbolWinnerKeys(expectedKeys);
 
   llvm::SmallVector<ATFieldInputSymbolBinding, 0> bindings;
   for (ELFFileBase *file : ctx.objectFiles) {
@@ -642,18 +634,6 @@ void lld::elf::notifyATFieldPayloadIncluded(InputFile *file) noexcept {
   event.reason = file->atfieldInclusionReason;
   event.trigger = file->atfieldTrigger;
   current->onPayloadIncluded(event);
-  state().payloadIncludedEvents.push_back(event);
-}
-
-void lld::elf::notifyATFieldPayloadIncludedSnapshot() noexcept {
-  auto *current = getATFieldInputObserver();
-  if (!current)
-    return;
-  auto &s = state();
-  if (s.payloadSnapshotNotified)
-    return;
-  s.payloadSnapshotNotified = true;
-  current->onPayloadIncludedSnapshot(s.payloadIncludedEvents);
 }
 
 void lld::elf::notifyATFieldParse(InputFile *file) noexcept {

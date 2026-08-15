@@ -151,7 +151,6 @@ static bool linkImpl(ArrayRef<const char *> args,
   if (success) {
     notifyATFieldInputSections(ctx);
     notifyATFieldSymbolWinners(ctx);
-    notifyATFieldPayloadIncludedSnapshot();
   }
   return success;
 }
@@ -343,7 +342,7 @@ static void setATFieldFileContext(
   file->atfieldMemberOrdinal = 0;
   file->atfieldMemberSize = 0;
   file->atfieldArgumentOrdinal = context.argumentOrdinal;
-  file->atfieldGroupId = file->groupId;
+  file->atfieldGroupId = context.groupId;
   file->atfieldInclusionReason = reason;
   file->atfieldTrigger = {};
   file->atfieldExternalMemberBytes = externalMemberBytes;
@@ -373,8 +372,13 @@ static void notifyATFieldDirectFile(InputFile *file, StringRef path,
                                     MemoryBufferRef originalContents) {
   if (!getATFieldInputObserver())
     return;
+  const ATFieldArgumentContext context = getATFieldArgumentContext();
+  const ATFieldOccurrence inputOccurrence = nextATFieldOccurrence();
+  ATFieldPreparedInputKey key;
+  key.argumentOrdinal = context.argumentOrdinal;
+  key.direct = true;
   setATFieldFileContext(
-      file, nextATFieldOccurrence(), 0, 0,
+      file, translateATFieldInputOccurrence(inputOccurrence, key), 0, 0,
       file->lazy ? ATFieldInputInclusionReason::Lazy
                  : ATFieldInputInclusionReason::Direct,
       false);
@@ -541,6 +545,16 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
                 : 0;
         ATFieldOccurrence inputOccurrence =
             getATFieldInputObserver() ? nextATFieldOccurrence() : 0;
+        if (getATFieldInputObserver()) {
+          ATFieldPreparedInputKey key;
+          key.argumentOrdinal = archiveContext.argumentOrdinal;
+          key.archiveOccurrence = archiveOccurrence;
+          key.archiveChildHeaderOffset = member.childHeaderOffset;
+          key.memberOrdinal = member.memberOrdinal;
+          key.thinArchive = archive.thin;
+          inputOccurrence =
+              translateATFieldInputOccurrence(inputOccurrence, key);
+        }
         setATFieldFileContext(file, inputOccurrence, archiveOccurrence,
                               memberOccurrence,
                               ATFieldInputInclusionReason::WholeArchive,
@@ -604,6 +618,16 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
                 : 0;
         ATFieldOccurrence inputOccurrence =
             getATFieldInputObserver() ? nextATFieldOccurrence() : 0;
+        if (getATFieldInputObserver()) {
+          ATFieldPreparedInputKey key;
+          key.argumentOrdinal = archiveContext.argumentOrdinal;
+          key.archiveOccurrence = archiveOccurrence;
+          key.archiveChildHeaderOffset = member.childHeaderOffset;
+          key.memberOrdinal = member.memberOrdinal;
+          key.thinArchive = archive.thin;
+          inputOccurrence =
+              translateATFieldInputOccurrence(inputOccurrence, key);
+        }
         setATFieldFileContext(file, inputOccurrence, archiveOccurrence,
                               memberOccurrence,
                               ATFieldInputInclusionReason::Lazy,

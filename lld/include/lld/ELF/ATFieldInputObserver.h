@@ -89,6 +89,11 @@ public:
     (void)thinArchive;
     return currentOccurrence;
   }
+  virtual llvm::Expected<uint64_t>
+  translateInputOccurrence(uint64_t currentOccurrence,
+                           const ATFieldPreparedInputKey &) {
+    return currentOccurrence;
+  }
   virtual llvm::Expected<ATFieldPreparedInputReplacement>
   provide(const ATFieldPreparedInputKey &) = 0;
 };
@@ -284,10 +289,6 @@ struct ATFieldSymbolWinnerEvent {
   bool weak = false;
   bool comdat = false;
 };
-struct ATFieldSymbolWinnerKey {
-  ATFieldOccurrence inputOccurrence = 0;
-  uint64_t inputSymbolIndex = 0;
-};
 struct ATFieldInputSymbolBinding {
   ATFieldOccurrence inputOccurrence = 0;
   uint64_t inputSymbolIndex = 0;
@@ -346,13 +347,11 @@ struct ATFieldObserverState {
   uint64_t nextCanonicalTargetToken = 1;
   llvm::DenseMap<uint64_t, ATFieldOccurrence> scriptOccurrences;
   llvm::DenseMap<uint64_t, uint64_t> archiveEncounterOrdinals;
-  llvm::SmallVector<ATFieldPayloadIncludedEvent, 0> payloadIncludedEvents;
   llvm::SmallVector<ATFieldInputSectionResolutionEvent, 0>
       preparedInputSections;
   llvm::SmallVector<ATFieldInputSectionPiece, 0> preparedInputSectionPieces;
   llvm::SmallVector<std::unique_ptr<std::string>, 0>
       preparedInputSectionStrings;
-  bool payloadSnapshotNotified = false;
 };
 
 // Event strings and buffers are borrowed until the synchronous callback returns.
@@ -367,15 +366,11 @@ public:
   virtual void onArchiveMemberCandidate(
       const ATFieldArchiveMemberCandidateEvent &) {}
   virtual void onPayloadIncluded(const ATFieldPayloadIncludedEvent &) {}
-  virtual void onPayloadIncludedSnapshot(
-      llvm::ArrayRef<ATFieldPayloadIncludedEvent>) {}
   virtual void onParse(const ATFieldInputParseEvent &) {}
   virtual void onLinkerScript(const ATFieldLinkerScriptEvent &) {}
   virtual void onInputSectionsResolved(
       llvm::ArrayRef<ATFieldInputSectionResolutionEvent>) {}
   virtual void onSymbolWinner(const ATFieldSymbolWinnerEvent &) {}
-  virtual void onExpectedSymbolWinnerKeys(
-      llvm::ArrayRef<ATFieldSymbolWinnerKey>) {}
   virtual void onInputSymbolBindings(
       llvm::ArrayRef<ATFieldInputSymbolBinding>) {}
 };
@@ -397,6 +392,8 @@ uint64_t translateATFieldArchiveMemberOccurrence(
     uint64_t, uint64_t archiveOccurrence, uint64_t argumentOrdinal,
     uint64_t childHeaderOffset, uint64_t memberOrdinal,
     bool thinArchive) noexcept;
+uint64_t translateATFieldInputOccurrence(
+    uint64_t, const ATFieldPreparedInputKey &) noexcept;
 uint64_t nextATFieldArchiveEncounterOrdinal(uint64_t argumentOrdinal) noexcept;
 class ATFieldInputObserverScope {
 public:
@@ -434,7 +431,6 @@ void setATFieldArgumentContext(const ATFieldArgumentContext &) noexcept;
 void clearATFieldArgumentContext() noexcept;
 void notifyATFieldParse(class InputFile *) noexcept;
 void notifyATFieldPayloadIncluded(class InputFile *) noexcept;
-void notifyATFieldPayloadIncludedSnapshot() noexcept;
 void notifyATFieldLinkerScript(uint64_t, llvm::StringRef,
                                llvm::MemoryBufferRef, bool nested = false,
                                ATFieldOccurrence nestedOccurrence = 0) noexcept;
