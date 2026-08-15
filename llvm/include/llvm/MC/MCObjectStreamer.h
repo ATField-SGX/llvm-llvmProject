@@ -114,6 +114,12 @@ public:
   void addFixup(const MCExpr *Value, MCFixupKind Kind);
 
   void emitLabel(MCSymbol *Symbol, SMLoc Loc = SMLoc()) override;
+  void emitAtfieldFunctionBegin(uint64_t PayloadOrdinal,
+                                uint64_t FunctionOrdinal) override;
+  void emitAtfieldFunctionEnd() override;
+  void emitAtfieldUnitBegin(bool SourceAsm, uint64_t UnitOrdinal,
+                            uint8_t UnitKind = 1,
+                            bool Bundle = false) override;
   virtual void emitLabelAtPos(MCSymbol *Symbol, SMLoc Loc, MCFragment &F,
                               uint64_t Offset);
   void emitAssignment(MCSymbol *Symbol, const MCExpr *Value) override;

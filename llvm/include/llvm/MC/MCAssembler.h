@@ -61,6 +61,21 @@ private:
   bool RelaxAll = false;
 
   SectionListType Sections;
+  MCSection *AtfieldManifestSection = nullptr;
+  SmallVector<std::unique_ptr<char[]>, 0> AtfieldManifestStorage;
+  struct AtfieldManifestRecord {
+    uint8_t Tag = 1;
+    uint8_t Kind = 0;
+    uint8_t Bundle = 0;
+    uint64_t Payload = 0;
+    uint64_t Function = 0;
+    uint64_t Ordinal = 0;
+    MCFragment *Fragment = nullptr;
+    uint64_t Offset = 0;
+    uint64_t Begin = 0;
+    uint64_t End = 0;
+  };
+  SmallVector<AtfieldManifestRecord, 0> AtfieldManifestRecords;
 
   SmallVector<const MCSymbol *, 0> Symbols;
 
@@ -115,6 +130,9 @@ private:
   void relaxDwarfLineAddr(MCFragment &F);
   void relaxDwarfCallFrameFragment(MCFragment &F);
   void relaxSFrameFragment(MCFragment &DF);
+  bool prepareAtfieldAnchors();
+  void emitAtfieldSymbols();
+  void emitAtfieldManifest();
 
 public:
   /// Construct a new assembler instance.

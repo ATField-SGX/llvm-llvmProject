@@ -482,6 +482,14 @@ public:
   // add the section we're emitting it to later.
   virtual void emitLabel(MCSymbol *Symbol, SMLoc Loc = SMLoc());
 
+  virtual void emitAtfieldFunctionBegin(uint64_t PayloadOrdinal,
+                                        uint64_t FunctionOrdinal) {}
+  virtual void emitAtfieldFunctionEnd() {}
+  virtual void emitAtfieldUnitBegin(bool SourceAsm, uint64_t UnitOrdinal,
+                                    uint8_t UnitKind = 1,
+                                    bool Bundle = false) {}
+  virtual void emitAtfieldUnitEnd(uint64_t UnitOrdinal) {}
+
   virtual void emitEHSymAttributes(const MCSymbol *Symbol, MCSymbol *EHSymbol);
 
   /// Emit a .subsection_via_symbols directive.

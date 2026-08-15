@@ -529,6 +529,10 @@ private:
     DK_LTO_SET_CONDITIONAL,
     DK_CFI_MTE_TAGGED_FRAME,
     DK_MEMTAG,
+    DK_ATFIELD_FUNCTION_BEGIN,
+    DK_ATFIELD_FUNCTION_END,
+    DK_ATFIELD_UNIT_BEGIN,
+    DK_ATFIELD_UNIT_END,
     DK_BASE64,
     DK_END
   };
@@ -536,6 +540,9 @@ private:
   /// Maps directive name --> DirectiveKind enum, for
   /// directives parsed by this class.
   StringMap<DirectiveKind> DirectiveKindMap;
+  bool AtfieldSourceAsmUnit = false;
+  uint64_t AtfieldNextUnitOrdinal = 0;
+  uint64_t AtfieldActiveUnitOrdinal = 0;
 
   // Codeview def_range type parsing.
   enum CVDefRangeType {
@@ -613,6 +620,11 @@ private:
   bool parseDirectiveCFIUndefined(SMLoc DirectiveLoc);
   bool parseDirectiveCFILabel(SMLoc DirectiveLoc);
   bool parseDirectiveCFIValOffset(SMLoc DirectiveLoc);
+  bool parseDirectiveAtfieldFunctionBegin(SMLoc DirectiveLoc);
+  bool parseDirectiveAtfieldFunctionEnd(SMLoc DirectiveLoc);
+  bool parseDirectiveAtfieldUnitBegin(SMLoc DirectiveLoc);
+  bool parseDirectiveAtfieldUnitEnd(SMLoc DirectiveLoc);
+  bool parseAtfieldOrdinal(uint64_t &Ordinal, SMLoc DirectiveLoc);
 
   // macro directives
   bool parseDirectivePurgeMacro(SMLoc DirectiveLoc);
@@ -2205,6 +2217,14 @@ bool AsmParser::parseStatement(ParseStatementInfo &Info,
       return parseDirectiveLTODiscard();
     case DK_MEMTAG:
       return parseDirectiveSymbolAttribute(MCSA_Memtag);
+    case DK_ATFIELD_FUNCTION_BEGIN:
+      return parseDirectiveAtfieldFunctionBegin(IDLoc);
+    case DK_ATFIELD_FUNCTION_END:
+      return parseDirectiveAtfieldFunctionEnd(IDLoc);
+    case DK_ATFIELD_UNIT_BEGIN:
+      return parseDirectiveAtfieldUnitBegin(IDLoc);
+    case DK_ATFIELD_UNIT_END:
+      return parseDirectiveAtfieldUnitEnd(IDLoc);
     }
 
     return Error(IDLoc, "unknown directive");
@@ -3070,6 +3090,89 @@ bool AsmParser::parseDirectiveAscii(StringRef IDVal, bool ZeroTerminated) {
   };
 
   return parseMany(parseOp);
+}
+
+bool AsmParser::parseAtfieldOrdinal(uint64_t &Ordinal, SMLoc DirectiveLoc) {
+  if (getTok().isNot(AsmToken::Integer))
+    return Error(DirectiveLoc, "ATField ordinal must be a decimal integer");
+  StringRef Spelling = getTok().getString();
+  if (Spelling.empty() ||
+      (Spelling.size() > 1 && Spelling.front() == '0')) {
+    return Error(DirectiveLoc, "ATField ordinal is not canonical decimal");
+  }
+  for (char C : Spelling)
+    if (C < '0' || C > '9')
+      return Error(DirectiveLoc, "ATField ordinal must be a decimal integer");
+  if (Spelling.getAsInteger(10, Ordinal))
+    return Error(DirectiveLoc, "ATField ordinal is out of range");
+  Lex();
+  return false;
+}
+
+bool AsmParser::parseDirectiveAtfieldFunctionBegin(SMLoc DirectiveLoc) {
+  if (AtfieldSourceAsmUnit)
+    return Error(DirectiveLoc, "ATField directive inside source assembly unit");
+  uint64_t PayloadOrdinal = 0;
+  uint64_t FunctionOrdinal = 0;
+  if (parseAtfieldOrdinal(PayloadOrdinal, DirectiveLoc) || parseComma() ||
+      parseAtfieldOrdinal(FunctionOrdinal, DirectiveLoc) || parseEOL())
+    return true;
+  AtfieldNextUnitOrdinal = 0;
+  getStreamer().emitAtfieldFunctionBegin(PayloadOrdinal, FunctionOrdinal);
+  return false;
+}
+
+bool AsmParser::parseDirectiveAtfieldFunctionEnd(SMLoc DirectiveLoc) {
+  if (AtfieldSourceAsmUnit)
+    return Error(DirectiveLoc, "ATField directive inside source assembly unit");
+  if (parseEOL())
+    return true;
+  getStreamer().emitAtfieldFunctionEnd();
+  return false;
+}
+
+bool AsmParser::parseDirectiveAtfieldUnitBegin(SMLoc DirectiveLoc) {
+  uint64_t SourceAsm = 0;
+  uint64_t UnitOrdinal = 0;
+  uint64_t UnitKind = 0;
+  uint64_t Bundle = 0;
+  if (parseAtfieldOrdinal(SourceAsm, DirectiveLoc) || parseComma() ||
+      parseAtfieldOrdinal(UnitOrdinal, DirectiveLoc) || parseComma() ||
+      parseAtfieldOrdinal(UnitKind, DirectiveLoc) || parseComma() ||
+      parseAtfieldOrdinal(Bundle, DirectiveLoc) || parseEOL())
+    return true;
+  if (SourceAsm != 0 && SourceAsm != 1)
+    return Error(DirectiveLoc, "ATField source-assembly flag must be 0 or 1");
+  if (UnitKind < 1 || UnitKind > 4)
+    return Error(DirectiveLoc, "ATField unit kind must be in range 1..4");
+  if (Bundle > 1)
+    return Error(DirectiveLoc, "ATField bundle flag must be 0 or 1");
+  if (SourceAsm != 0 && UnitKind != 2)
+    return Error(DirectiveLoc,
+                 "inline ATField units must have inline-asm kind");
+  if (AtfieldSourceAsmUnit)
+    return Error(DirectiveLoc, "nested ATField source assembly unit");
+  if (UnitOrdinal != AtfieldNextUnitOrdinal)
+    return Error(DirectiveLoc, "unexpected ATField unit ordinal");
+  ++AtfieldNextUnitOrdinal;
+  AtfieldSourceAsmUnit = SourceAsm != 0;
+  AtfieldActiveUnitOrdinal = static_cast<uint64_t>(UnitOrdinal);
+  getStreamer().emitAtfieldUnitBegin(
+      SourceAsm != 0, AtfieldActiveUnitOrdinal, UnitKind, Bundle != 0);
+  return false;
+}
+
+bool AsmParser::parseDirectiveAtfieldUnitEnd(SMLoc DirectiveLoc) {
+  uint64_t UnitOrdinal = 0;
+  if (parseAtfieldOrdinal(UnitOrdinal, DirectiveLoc) || parseEOL())
+    return true;
+  if (!AtfieldSourceAsmUnit)
+    return Error(DirectiveLoc, "ATField source assembly unit has no begin");
+  if (UnitOrdinal != AtfieldActiveUnitOrdinal)
+    return Error(DirectiveLoc, "mismatched ATField source assembly unit ordinal");
+  AtfieldSourceAsmUnit = false;
+  getStreamer().emitAtfieldUnitEnd(AtfieldActiveUnitOrdinal);
+  return false;
 }
 
 /// parseDirectiveBase64:
@@ -5531,6 +5634,10 @@ void AsmParser::initializeDirectiveKindMap() {
   DirectiveKindMap[".lto_discard"] = DK_LTO_DISCARD;
   DirectiveKindMap[".lto_set_conditional"] = DK_LTO_SET_CONDITIONAL;
   DirectiveKindMap[".memtag"] = DK_MEMTAG;
+  DirectiveKindMap[".atfield_function_begin"] = DK_ATFIELD_FUNCTION_BEGIN;
+  DirectiveKindMap[".atfield_function_end"] = DK_ATFIELD_FUNCTION_END;
+  DirectiveKindMap[".atfield_unit_begin"] = DK_ATFIELD_UNIT_BEGIN;
+  DirectiveKindMap[".atfield_unit_end"] = DK_ATFIELD_UNIT_END;
 }
 
 MCAsmMacro *AsmParser::parseMacroLikeBody(SMLoc DirectiveLoc) {

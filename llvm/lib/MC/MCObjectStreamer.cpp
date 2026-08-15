@@ -77,6 +77,24 @@ void MCObjectStreamer::newFragment() {
   addFragment(F);
 }
 
+void MCObjectStreamer::emitAtfieldFunctionBegin(uint64_t PayloadOrdinal,
+                                                uint64_t FunctionOrdinal) {
+  newSpecialFragment<MCAtfieldFragment>(
+      MCAtfieldFragment::FunctionBegin, PayloadOrdinal, FunctionOrdinal);
+}
+
+void MCObjectStreamer::emitAtfieldFunctionEnd() {
+  newSpecialFragment<MCAtfieldFragment>(MCAtfieldFragment::FunctionEnd);
+}
+
+void MCObjectStreamer::emitAtfieldUnitBegin(bool SourceAsm,
+                                            uint64_t UnitOrdinal,
+                                            uint8_t UnitKind, bool Bundle) {
+  newSpecialFragment<MCAtfieldFragment>(MCAtfieldFragment::Anchor, 0, 0,
+                                         SourceAsm, UnitOrdinal, UnitKind,
+                                         Bundle);
+}
+
 void MCObjectStreamer::ensureHeadroom(size_t Headroom) {
   if (Headroom <= FragSpace)
     return;

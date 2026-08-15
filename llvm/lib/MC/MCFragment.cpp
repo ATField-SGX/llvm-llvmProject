@@ -59,6 +59,8 @@ LLVM_DUMP_METHOD void MCFragment::dump() const {
   case MCFragment::FT_SymbolId:      OS << "SymbolId"; break;
   case MCFragment::FT_CVInlineLines: OS << "CVInlineLineTable"; break;
   case MCFragment::FT_CVDefRange:    OS << "CVDefRangeTable"; break;
+  case MCFragment::FT_AtfieldAnchor: OS << "AtfieldAnchor"; break;
+  case MCFragment::FT_AtfieldMarker: OS << "AtfieldMarker"; break;
     // clang-format on
   }
 
@@ -190,6 +192,9 @@ LLVM_DUMP_METHOD void MCFragment::dump() const {
     }
     break;
   }
+  case MCFragment::FT_AtfieldAnchor:
+  case MCFragment::FT_AtfieldMarker:
+    break;
   }
 }
 #endif

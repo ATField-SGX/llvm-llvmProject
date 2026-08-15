@@ -127,6 +127,12 @@ public:
   /// of each call to runOnMachineFunction().
   MCSymbol *CurrentFnSym = nullptr;
 
+  /// Dense source-assembly unit ordinal stream for ATField parser validation.
+  uint64_t AtfieldNextUnitOrdinal = 0;
+
+  /// PATCHABLE_OP shares one indivisible ATField unit with its next emitted MI.
+  bool AtfieldPatchableOpPending = false;
+
   /// The symbol for the current function descriptor on AIX. This is created
   /// at the beginning of each call to SetupMachineFunction().
   MCSymbol *CurrentFnDescSym = nullptr;

@@ -7,7 +7,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/MC/MCAssembler.h"
+#include "llvm/BinaryFormat/ELF.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringRef.h"
@@ -24,7 +26,10 @@
 #include "llvm/MC/MCObjectWriter.h"
 #include "llvm/MC/MCSFrame.h"
 #include "llvm/MC/MCSection.h"
+#include "llvm/MC/MCSectionELF.h"
+#include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCSymbol.h"
+#include "llvm/MC/MCSymbolELF.h"
 #include "llvm/MC/MCValue.h"
 #include "llvm/Support/Alignment.h"
 #include "llvm/Support/Casting.h"
@@ -33,8 +38,12 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/LEB128.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Triple.h"
 #include <cassert>
 #include <cstdint>
+#include <cstring>
+#include <limits>
+#include <map>
 #include <tuple>
 #include <utility>
 
@@ -47,6 +56,132 @@ class MCSubtargetInfo;
 #define DEBUG_TYPE "assembler"
 
 namespace {
+constexpr uint64_t AtfieldPageSize = 4096;
+
+struct AtfieldFunctionView {
+  MCAtfieldFragment *Begin = nullptr;
+  MCAtfieldFragment *End = nullptr;
+  SmallVector<MCAtfieldFragment *, 8> Units;
+};
+
+static void writeFragment(raw_ostream &OS, const MCAssembler &Asm,
+                          const MCFragment &F);
+
+static bool atfieldMaterialize(const MCAssembler &Assembler,
+                               const MCFragment &F,
+                               SmallVectorImpl<char> &Contents) {
+  switch (F.getKind()) {
+  case MCFragment::FT_AtfieldAnchor:
+  case MCFragment::FT_AtfieldMarker:
+    return true;
+  case MCFragment::FT_Data:
+  case MCFragment::FT_Relaxable:
+  case MCFragment::FT_Align:
+  case MCFragment::FT_Fill:
+  case MCFragment::FT_LEB:
+  case MCFragment::FT_Nops:
+  case MCFragment::FT_Org:
+  case MCFragment::FT_Dwarf:
+  case MCFragment::FT_DwarfFrame:
+  case MCFragment::FT_SFrame:
+  case MCFragment::FT_BoundaryAlign:
+  case MCFragment::FT_SymbolId:
+  case MCFragment::FT_CVInlineLines:
+  case MCFragment::FT_CVDefRange:
+    break;
+  default:
+    return false;
+  }
+  SmallString<64> Bytes;
+  raw_svector_ostream Stream(Bytes);
+  writeFragment(Stream, Assembler, F);
+  Contents.append(Bytes.begin(), Bytes.end());
+  return true;
+}
+
+static bool atfieldFixupCovers(const MCAssembler &Assembler,
+                               const MCFragment &F, uint64_t Offset) {
+  auto covers = [&](ArrayRef<MCFixup> Fixups) {
+    for (const MCFixup &Fixup : Fixups) {
+    uint64_t Width = 0;
+    if (Fixup.getKind() >= FirstLiteralRelocationKind) {
+      // A literal relocation kind is target-specific. Unknown x86-64 ELF
+      // values are deliberately conservative and cover the entire fragment.
+      if (Assembler.getContext().getTargetTriple().getArch() !=
+              Triple::x86_64 ||
+          !Assembler.getContext().getTargetTriple().isOSBinFormatELF())
+        return true;
+      switch (unsigned(Fixup.getKind()) - FirstLiteralRelocationKind) {
+      case ELF::R_X86_64_NONE:
+        continue;
+      case ELF::R_X86_64_64:
+      case ELF::R_X86_64_DTPMOD64:
+      case ELF::R_X86_64_DTPOFF64:
+      case ELF::R_X86_64_TPOFF64:
+      case ELF::R_X86_64_PC64:
+      case ELF::R_X86_64_GOTOFF64:
+      case ELF::R_X86_64_GOT64:
+      case ELF::R_X86_64_GOTPCREL64:
+      case ELF::R_X86_64_GOTPC64:
+      case ELF::R_X86_64_GOTPLT64:
+      case ELF::R_X86_64_PLTOFF64:
+      case ELF::R_X86_64_SIZE64:
+        Width = 8;
+        break;
+      case ELF::R_X86_64_PC32:
+      case ELF::R_X86_64_GOT32:
+      case ELF::R_X86_64_PLT32:
+      case ELF::R_X86_64_GOTPCREL:
+      case ELF::R_X86_64_32:
+      case ELF::R_X86_64_32S:
+      case ELF::R_X86_64_TLSGD:
+      case ELF::R_X86_64_TLSLD:
+      case ELF::R_X86_64_DTPOFF32:
+      case ELF::R_X86_64_GOTTPOFF:
+      case ELF::R_X86_64_TPOFF32:
+      case ELF::R_X86_64_GOTPC32:
+      case ELF::R_X86_64_SIZE32:
+      case ELF::R_X86_64_GOTPC32_TLSDESC:
+      case ELF::R_X86_64_GOTPCRELX:
+      case ELF::R_X86_64_REX_GOTPCRELX:
+        Width = 4;
+        break;
+      case ELF::R_X86_64_16:
+      case ELF::R_X86_64_PC16:
+        Width = 2;
+        break;
+      case ELF::R_X86_64_8:
+      case ELF::R_X86_64_PC8:
+        Width = 1;
+        break;
+      default:
+        return true;
+      }
+    } else {
+      Width = (Assembler.getBackend().getFixupKindInfo(Fixup.getKind())
+                   .TargetSize +
+               7) /
+              8;
+    }
+      if (Width == 0)
+        Width = 1;
+      if (Fixup.getOffset() <= Offset &&
+          Offset - Fixup.getOffset() < Width)
+        return true;
+    }
+    return false;
+  };
+  return covers(F.getFixups()) || covers(F.getVarFixups());
+}
+
+static bool atfieldFixupRewritesInstruction(const MCAssembler &,
+                                            const MCFragment &F) {
+  // Fixups are conservatively treated as instruction-rewriting.  This
+  // deliberately excludes the complete fragment from natural-C3 candidacy,
+  // including all target-specific relocation kinds.
+  return !F.getFixups().empty() || !F.getVarFixups().empty();
+}
+
 namespace stats {
 
 STATISTIC(EmittedFragments, "Number of emitted assembler fragments - total");
@@ -93,6 +228,9 @@ void MCAssembler::reset() {
   HasFinalLayout = false;
   RelaxAll = false;
   Sections.clear();
+  AtfieldManifestSection = nullptr;
+  AtfieldManifestStorage.clear();
+  AtfieldManifestRecords.clear();
   Symbols.clear();
   ThumbFuncs.clear();
 
@@ -227,6 +365,10 @@ uint64_t MCAssembler::computeFragmentSize(const MCFragment &F) const {
 
   case MCFragment::FT_SymbolId:
     return 4;
+  case MCFragment::FT_AtfieldAnchor:
+    return cast<MCAtfieldFragment>(F).isEnabled() ? 7 : 0;
+  case MCFragment::FT_AtfieldMarker:
+    return 0;
 
   case MCFragment::FT_Org: {
     const MCOrgFragment &OF = cast<MCOrgFragment>(F);
@@ -255,6 +397,7 @@ uint64_t MCAssembler::computeFragmentSize(const MCFragment &F) const {
     }
     return Size;
   }
+
   }
 
   llvm_unreachable("invalid fragment kind");
@@ -380,6 +523,7 @@ void MCAssembler::addRelocDirective(RelocDirective RD) {
   relocDirectives.push_back(RD);
 }
 
+namespace {
 /// Write the fragment \p F to the output file.
 static void writeFragment(raw_ostream &OS, const MCAssembler &Asm,
                           const MCFragment &F) {
@@ -550,11 +694,27 @@ static void writeFragment(raw_ostream &OS, const MCAssembler &Asm,
     break;
   }
 
+  case MCFragment::FT_AtfieldAnchor:
+  case MCFragment::FT_AtfieldMarker: {
+    const auto &AF = cast<MCAtfieldFragment>(F);
+    if (AF.isEnabled()) {
+      static constexpr char Wrapper[] = {
+          char(0x0f), char(0x1f), char(0x80), char(0xc3),
+          char(0x00), char(0x00), char(0x00)};
+      OS.write(Wrapper, sizeof(Wrapper));
+      assert(FragmentSize == sizeof(Wrapper) &&
+             "invalid ATField anchor size");
+    } else {
+      assert(FragmentSize == 0 && "ATField marker must be zero-sized");
+    }
+    break;
+  }
   }
 
   assert(OS.tell() - Start == FragmentSize &&
          "The stream should advance by fragment size");
 }
+} // namespace
 
 void MCAssembler::writeSectionData(raw_ostream &OS,
                                    const MCSection *Sec) const {
@@ -624,6 +784,24 @@ void MCAssembler::layout() {
     dump();
   });
 
+  bool HasAtfield = false;
+  for (MCSection &Sec : *this)
+    for (MCFragment &Frag : Sec)
+      HasAtfield |= isa<MCAtfieldFragment>(&Frag);
+  if (HasAtfield && !AtfieldManifestSection &&
+      Context.getTargetTriple().isOSBinFormatELF()) {
+    AtfieldManifestSection =
+        Context.getELFSection(".note.atfield.anchors", ELF::SHT_NOTE, 0);
+    AtfieldManifestSection->setAlignment(Align(4));
+    if (!AtfieldManifestSection->CurFragList) {
+      AtfieldManifestSection->Subsections.push_back(
+          {0u, MCSection::FragList{}});
+      AtfieldManifestSection->CurFragList =
+          &AtfieldManifestSection->Subsections.back().second;
+    }
+    registerSection(*AtfieldManifestSection);
+  }
+
   // Assign section ordinals.
   unsigned SectionIndex = 0;
   for (MCSection &Sec : *this) {
@@ -652,16 +830,47 @@ void MCAssembler::layout() {
   this->HasLayout = true;
   for (MCSection &Sec : *this)
     layoutSection(Sec);
-  unsigned FirstStable = Sections.size();
-  while ((FirstStable = relaxOnce(FirstStable)) > 0)
+  while (true) {
+    unsigned FirstStable = Sections.size();
+    while ((FirstStable = relaxOnce(FirstStable)) > 0)
+      if (getContext().hadError())
+        return;
     if (getContext().hadError())
       return;
-
-  // Some targets might want to adjust fragment offsets. If so, perform another
-  // layout iteration.
-  if (getBackend().finishLayout())
+    const bool AnchorEnabled = prepareAtfieldAnchors();
+    if (getContext().hadError())
+      return;
+    if (!AnchorEnabled)
+      break;
     for (MCSection &Sec : *this)
       layoutSection(Sec);
+    // The newly enabled fragments change offsets and may trigger branch
+    // relaxation; repeat until the monotonic anchor set is stable.
+  }
+  // Some targets might adjust fragment offsets in finishLayout().  Anchors
+  // can themselves change those offsets, so keep the target finalization and
+  // monotonic anchor preparation in one fixed point.
+  while (true) {
+    if (getBackend().finishLayout()) {
+      for (MCSection &Sec : *this)
+        layoutSection(Sec);
+    }
+    unsigned FirstStable = Sections.size();
+    while ((FirstStable = relaxOnce(FirstStable)) > 0)
+      if (getContext().hadError())
+        return;
+    if (getContext().hadError())
+      return;
+    const bool AnchorEnabled = prepareAtfieldAnchors();
+    if (getContext().hadError())
+      return;
+    if (!AnchorEnabled)
+      break;
+    for (MCSection &Sec : *this)
+      layoutSection(Sec);
+  }
+  emitAtfieldSymbols();
+  emitAtfieldManifest();
 
   flushPendingErrors();
 
@@ -1014,8 +1223,10 @@ unsigned MCAssembler::relaxOnce(unsigned FirstStable) {
   unsigned Res = 0;
   for (unsigned I = 0; I != FirstStable; ++I) {
     // Assume each iteration finalizes at least one extra fragment. If the
-    // layout does not converge after N+1 iterations, bail out.
+    // relaxation does not converge after N+1 iterations, bail out.
     auto &Sec = *Sections[I];
+    if (!Sec.curFragList()->Tail)
+      continue;
     auto MaxIter = Sec.curFragList()->Tail->getLayoutOrder() + 1;
     for (;;) {
       bool Changed = false;
@@ -1037,6 +1248,459 @@ unsigned MCAssembler::relaxOnce(unsigned FirstStable) {
   // The subsequent relaxOnce call only needs to visit Sections [0,Res) if no
   // change occurred.
   return Res;
+}
+
+bool MCAssembler::prepareAtfieldAnchors() {
+  SmallVector<AtfieldFunctionView, 8> Functions;
+  AtfieldFunctionView *Current = nullptr;
+  for (MCSection &Section : *this) {
+    if (Current) {
+      reportError(SMLoc(), "ATField function is split across sections");
+      return false;
+    }
+    for (MCFragment &Fragment : Section) {
+      auto *Atfield = dyn_cast<MCAtfieldFragment>(&Fragment);
+      if (!Atfield)
+        continue;
+      if (Atfield->isFunctionBegin()) {
+        if (Current) {
+          reportError(SMLoc(), "nested ATField function markers");
+          return false;
+        }
+        Functions.push_back({});
+        Current = &Functions.back();
+        Current->Begin = Atfield;
+      } else if (Atfield->isFunctionEnd()) {
+        if (!Current) {
+          reportError(SMLoc(), "ATField function end has no begin");
+          return false;
+        }
+        Current->End = Atfield;
+        Current = nullptr;
+      } else if (Atfield->isAnchor()) {
+        if (!Current) {
+          reportError(SMLoc(), "ATField unit marker is outside a function");
+          return false;
+        }
+        Current->Units.push_back(Atfield);
+      }
+    }
+  }
+  if (Current) {
+    reportError(SMLoc(), "ATField function has no end marker");
+    return false;
+  }
+
+  bool Changed = false;
+  for (AtfieldFunctionView &Function : Functions) {
+    if (!Function.Begin || !Function.End ||
+        Function.Begin->getParent() != Function.End->getParent()) {
+      reportError(SMLoc(), "ATField function has non-contiguous section layout");
+      return false;
+    }
+    const uint64_t Begin = getFragmentOffset(*Function.Begin);
+    const uint64_t End = getFragmentOffset(*Function.End);
+    if (End <= Begin) {
+      reportError(SMLoc(), "ATField function has zero length");
+      return false;
+    }
+
+    SmallVector<uint64_t, 16> Natural;
+    for (MCFragment &Fragment : *Function.Begin->getParent()) {
+      const uint64_t FragmentOffset = getFragmentOffset(Fragment);
+      if (FragmentOffset < Begin || FragmentOffset >= End ||
+          isa<MCAtfieldFragment>(Fragment))
+        continue;
+      SmallVector<char, 64> Contents;
+      if (!atfieldMaterialize(*this, Fragment, Contents))
+        return false;
+      if (Contents.empty())
+        continue;
+      if (atfieldFixupRewritesInstruction(*this, Fragment))
+        continue;
+      for (uint64_t Offset = 0; Offset != Contents.size(); ++Offset)
+        if (static_cast<unsigned char>(Contents[Offset]) == 0xc3 &&
+            !atfieldFixupCovers(*this, Fragment, Offset))
+          Natural.push_back(FragmentOffset + Offset);
+    }
+    llvm::sort(Natural);
+    Natural.erase(std::unique(Natural.begin(), Natural.end()), Natural.end());
+
+    SmallVector<uint64_t, 16> Stable;
+    for (MCAtfieldFragment *Unit : Function.Units)
+      if (Unit->isEnabled())
+        Stable.push_back(getFragmentOffset(*Unit) + 3);
+    Stable.append(Natural.begin(), Natural.end());
+    llvm::sort(Stable);
+    Stable.erase(std::unique(Stable.begin(), Stable.end()), Stable.end());
+
+    uint64_t Last = Begin;
+    bool First = true;
+    size_t StableIndex = 0;
+    while (StableIndex != Stable.size()) {
+      const uint64_t Next = Stable[StableIndex];
+      const bool Good = First ? Next - Begin < AtfieldPageSize
+                              : Next - Last <= AtfieldPageSize;
+      if (Good) {
+        Last = Next;
+        First = false;
+        ++StableIndex;
+        continue;
+      }
+      MCAtfieldFragment *Selected = nullptr;
+      uint64_t SelectedOffset = 0;
+      for (MCAtfieldFragment *Candidate : Function.Units) {
+        if (Candidate->isEnabled())
+          continue;
+        const uint64_t Offset = getFragmentOffset(*Candidate);
+        if (Offset < Last || Offset >= Next || Offset + 3 - Last > AtfieldPageSize ||
+            (First && Offset + 3 - Begin >= AtfieldPageSize))
+          continue;
+        if (!Selected || Offset > SelectedOffset) {
+          Selected = Candidate;
+          SelectedOffset = Offset;
+        }
+      }
+      if (!Selected) {
+        reportError(SMLoc(),
+                    "ATField function has no complete-unit anchor boundary");
+        return Changed;
+      }
+      Selected->setEnabled();
+      Changed = true;
+      Last = SelectedOffset + 3;
+      First = false;
+    }
+    while (End > Last && End - 1 - Last >= AtfieldPageSize) {
+      MCAtfieldFragment *Selected = nullptr;
+      uint64_t SelectedOffset = 0;
+      for (MCAtfieldFragment *Candidate : Function.Units) {
+        if (Candidate->isEnabled())
+          continue;
+        const uint64_t Offset = getFragmentOffset(*Candidate);
+        if (Offset < Last || Offset + 3 >= End ||
+            Offset + 3 - Last > AtfieldPageSize)
+          continue;
+        if (!Selected || Offset > SelectedOffset) {
+          Selected = Candidate;
+          SelectedOffset = Offset;
+        }
+      }
+      if (!Selected) {
+        reportError(SMLoc(), "ATField function tail has no anchor boundary");
+        return Changed;
+      }
+      Selected->setEnabled();
+      Changed = true;
+      Last = SelectedOffset + 3;
+    }
+    if (End - 1 < Last || End - 1 - Last >= AtfieldPageSize) {
+      reportError(SMLoc(), "ATField function anchor interval is too long");
+      return Changed;
+    }
+  }
+  return Changed;
+}
+
+void MCAssembler::emitAtfieldSymbols() {
+  AtfieldManifestRecords.clear();
+  SmallVector<AtfieldFunctionView, 8> Functions;
+  AtfieldFunctionView *Current = nullptr;
+  for (MCSection &Section : *this)
+    for (MCFragment &Fragment : Section) {
+      auto *Atfield = dyn_cast<MCAtfieldFragment>(&Fragment);
+      if (!Atfield)
+        continue;
+      if (Atfield->isFunctionBegin()) {
+        Functions.push_back({});
+        Current = &Functions.back();
+        Current->Begin = Atfield;
+      } else if (Atfield->isFunctionEnd()) {
+        if (Current) {
+          Current->End = Atfield;
+          Current = nullptr;
+        }
+      } else if (Current && Atfield->isAnchor())
+        Current->Units.push_back(Atfield);
+    }
+
+  for (AtfieldFunctionView &Function : Functions) {
+    if (!Function.Begin || !Function.End ||
+        Function.Begin->getParent() != Function.End->getParent()) {
+      reportError(SMLoc(), "ATField function has incomplete anchor range");
+      return;
+    }
+    SmallVector<std::pair<uint64_t, MCAtfieldFragment *>, 16> Locations;
+    for (MCAtfieldFragment *Unit : Function.Units)
+      if (Unit->isEnabled())
+        Locations.push_back({getFragmentOffset(*Unit) + 3, Unit});
+    const uint64_t Begin = getFragmentOffset(*Function.Begin);
+    const uint64_t End = getFragmentOffset(*Function.End);
+    auto EmitFunctionSymbol = [&](StringRef Name, MCFragment *Target) {
+      MCSymbol *FunctionSymbol =
+          getContext().getOrCreateSymbol(Name);
+      if (FunctionSymbol->isDefined()) {
+        reportError(SMLoc(), "duplicate ATField function symbol");
+        return false;
+      }
+      FunctionSymbol->setFragment(Target);
+      FunctionSymbol->setOffset(0);
+      registerSymbol(*FunctionSymbol);
+      auto *ELFSymbol = static_cast<MCSymbolELF *>(FunctionSymbol);
+      ELFSymbol->setBinding(ELF::STB_GLOBAL);
+      ELFSymbol->setVisibility(ELF::STV_HIDDEN);
+      ELFSymbol->setType(ELF::STT_NOTYPE);
+      return true;
+    };
+    const std::string BeginName =
+        (Twine("__atfield_function_begin_p") +
+         Twine(Function.Begin->getPayloadOrdinal()) + Twine("_f") +
+         Twine(Function.Begin->getFunctionOrdinal()))
+            .str();
+    const std::string EndName =
+        (Twine("__atfield_function_end_p") +
+         Twine(Function.Begin->getPayloadOrdinal()) + Twine("_f") +
+         Twine(Function.Begin->getFunctionOrdinal()))
+            .str();
+    if (!EmitFunctionSymbol(BeginName, Function.Begin) ||
+        !EmitFunctionSymbol(EndName, Function.End))
+      return;
+    AtfieldManifestRecords.push_back(
+        {3, 0, 0, Function.Begin->getPayloadOrdinal(),
+         Function.Begin->getFunctionOrdinal(), 0, Function.Begin, 0, Begin,
+         End});
+    SmallVector<std::pair<uint64_t, uint64_t>, 16> UnitRanges;
+    uint64_t SerializedUnitOrdinal = 0;
+    for (size_t UnitIndex = 0; UnitIndex != Function.Units.size();
+         ++UnitIndex) {
+      MCAtfieldFragment *Unit = Function.Units[UnitIndex];
+      const uint64_t UnitBegin = getFragmentOffset(*Unit);
+      const uint64_t SerializedUnitBegin =
+          Unit->isEnabled() ? UnitBegin + 7 : UnitBegin;
+      const uint64_t UnitEnd =
+          UnitIndex + 1 == Function.Units.size()
+              ? End
+              : getFragmentOffset(*Function.Units[UnitIndex + 1]);
+      if (UnitEnd < SerializedUnitBegin) {
+        reportError(SMLoc(), "ATField unit range is not monotonic");
+        return;
+      }
+      if (UnitEnd > SerializedUnitBegin) {
+        AtfieldManifestRecords.push_back(
+            {2, Unit->getUnitKind(), static_cast<uint8_t>(Unit->isBundle()),
+             Function.Begin->getPayloadOrdinal(),
+             Function.Begin->getFunctionOrdinal(), SerializedUnitOrdinal++, Unit,
+             0, SerializedUnitBegin, UnitEnd});
+        UnitRanges.push_back({SerializedUnitBegin, UnitEnd});
+      }
+    }
+    uint64_t ConstructedOrdinal = SerializedUnitOrdinal;
+    for (MCAtfieldFragment *Unit : Function.Units) {
+      if (!Unit->isEnabled())
+        continue;
+      const uint64_t AnchorBegin = getFragmentOffset(*Unit);
+      UnitRanges.push_back({AnchorBegin, AnchorBegin + 7});
+      AtfieldManifestRecords.push_back(
+          {2, 4, 0, Function.Begin->getPayloadOrdinal(),
+           Function.Begin->getFunctionOrdinal(), ConstructedOrdinal++, Unit, 0,
+           AnchorBegin, AnchorBegin + 7});
+    }
+    llvm::sort(UnitRanges);
+    uint64_t UnitCursor = Begin;
+    for (auto [UnitBegin, UnitEnd] : UnitRanges) {
+      if (UnitBegin != UnitCursor || UnitEnd < UnitBegin) {
+        reportError(SMLoc(), "ATField unit ranges are not continuous");
+        return;
+      }
+      UnitCursor = UnitEnd;
+    }
+    if (UnitCursor != End) {
+      reportError(SMLoc(), "ATField unit ranges do not cover function");
+      return;
+    }
+    for (MCFragment &Fragment : *Function.Begin->getParent()) {
+      const uint64_t FragmentOffset = getFragmentOffset(Fragment);
+      if (FragmentOffset < Begin || FragmentOffset >= End ||
+          isa<MCAtfieldFragment>(Fragment))
+        continue;
+      SmallVector<char, 64> Contents;
+      if (!atfieldMaterialize(*this, Fragment, Contents) || Contents.empty() ||
+          atfieldFixupRewritesInstruction(*this, Fragment))
+        continue;
+      for (uint64_t Offset = 0; Offset != Contents.size(); ++Offset)
+        if (static_cast<unsigned char>(Contents[Offset]) == 0xc3 &&
+            !atfieldFixupCovers(*this, Fragment, Offset))
+          Locations.push_back({FragmentOffset + Offset, nullptr});
+    }
+    llvm::sort(Locations, [](auto &L, auto &R) { return L.first < R.first; });
+    Locations.erase(std::unique(Locations.begin(), Locations.end(),
+                                [](auto &L, auto &R) { return L.first == R.first; }),
+                    Locations.end());
+
+    uint64_t AnchorOrdinal = 0;
+    for (auto [Address, Fragment] : Locations) {
+      MCFragment *Target = Fragment;
+      uint64_t Offset = 3;
+      if (!Target) {
+        for (MCFragment &Candidate : *Function.Begin->getParent()) {
+          SmallVector<char, 64> Contents;
+          if (!atfieldMaterialize(*this, Candidate, Contents))
+            continue;
+          const uint64_t CandidateOffset = getFragmentOffset(Candidate);
+          if (Address < CandidateOffset || Address >= CandidateOffset + Contents.size())
+            continue;
+          Target = &Candidate;
+          Offset = Address - CandidateOffset;
+          break;
+        }
+      }
+      if (!Target) {
+        reportError(SMLoc(), "ATField anchor has no materialized target");
+        return;
+      }
+      const std::string Name =
+          (Twine("__atfield_anchor_p") +
+           Twine(Function.Begin->getPayloadOrdinal()) + Twine("_f") +
+           Twine(Function.Begin->getFunctionOrdinal()) + Twine("_a") +
+           Twine(AnchorOrdinal++))
+              .str();
+      MCSymbol *Symbol = getContext().getOrCreateSymbol(Name);
+      if (Symbol->isDefined()) {
+        reportError(SMLoc(), "duplicate ATField anchor symbol");
+        return;
+      }
+      Symbol->setFragment(Target);
+      Symbol->setOffset(Offset);
+      registerSymbol(*Symbol);
+      auto *ELFSymbol = static_cast<MCSymbolELF *>(Symbol);
+      ELFSymbol->setBinding(ELF::STB_GLOBAL);
+      ELFSymbol->setVisibility(ELF::STV_HIDDEN);
+      ELFSymbol->setType(ELF::STT_NOTYPE);
+      AtfieldManifestRecords.push_back(
+          {1,
+           static_cast<uint8_t>(Fragment ? 2 : 1),
+           0,
+           Function.Begin->getPayloadOrdinal(),
+           Function.Begin->getFunctionOrdinal(),
+           AnchorOrdinal - 1,
+           Target,
+           Offset,
+           Begin,
+           End});
+    }
+  }
+}
+
+void MCAssembler::emitAtfieldManifest() {
+  if (!AtfieldManifestSection)
+    return;
+
+  struct Record {
+    uint8_t Tag = 0;
+    uint8_t Kind = 0;
+    uint8_t Bundle = 0;
+    uint64_t Payload = 0;
+    uint64_t Function = 0;
+    uint64_t Ordinal = 0;
+    uint64_t Offset = 0;
+    uint64_t Begin = 0;
+    uint64_t End = 0;
+  };
+
+  SmallVector<Record, 16> Records;
+  for (const AtfieldManifestRecord &Entry : AtfieldManifestRecords) {
+    if (!Entry.Fragment || !Entry.Fragment->getParent() || Entry.End < Entry.Begin) {
+      reportError(SMLoc(), "invalid ATField anchor manifest record");
+      return;
+    }
+    const uint64_t Offset =
+        Entry.Tag == 1 ? getFragmentOffset(*Entry.Fragment) + Entry.Offset : 0;
+    Records.push_back({Entry.Tag,
+                       Entry.Kind,
+                       Entry.Bundle,
+                       Entry.Payload,
+                       Entry.Function,
+                       Entry.Ordinal,
+                       Offset,
+                       Entry.Begin,
+                       Entry.End});
+  }
+  llvm::sort(Records, [](const Record &Left, const Record &Right) {
+    return std::tie(Left.Payload, Left.Function, Left.Tag, Left.Ordinal) <
+           std::tie(Right.Payload, Right.Function, Right.Tag, Right.Ordinal);
+  });
+  if (Records.empty()) {
+    reportError(SMLoc(), "ATField manifest has no anchor records");
+    return;
+  }
+  if (Records.size() > std::numeric_limits<uint32_t>::max()) {
+    reportError(SMLoc(), "ATField manifest has too many anchor records");
+    return;
+  }
+
+  SmallVector<char, 0> Description;
+  auto append16 = [&](uint16_t Value) {
+    Description.push_back(static_cast<char>(Value));
+    Description.push_back(static_cast<char>(Value >> 8));
+  };
+  auto append32 = [&](uint32_t Value) {
+    for (unsigned Shift = 0; Shift != 32; Shift += 8)
+      Description.push_back(static_cast<char>(Value >> Shift));
+  };
+  auto append64 = [&](uint64_t Value) {
+    for (unsigned Shift = 0; Shift != 64; Shift += 8)
+      Description.push_back(static_cast<char>(Value >> Shift));
+  };
+  append32(0x324e4641u);
+  append16(1);
+  append16(80);
+  append32(static_cast<uint32_t>(Records.size()));
+  append32(0);
+  for (const Record &Entry : Records) {
+    Description.push_back(static_cast<char>(Entry.Tag));
+    Description.push_back(static_cast<char>(Entry.Kind));
+    Description.push_back(static_cast<char>(Entry.Bundle));
+    Description.push_back(0);
+    append32(0);
+    append64(Entry.Payload);
+    append64(Entry.Function);
+    append64(Entry.Ordinal);
+    append32(0);
+    append32(0);
+    append64(Entry.Begin);
+    append64(Entry.End);
+    append64(Entry.Offset);
+    append64(0);
+    append64(0);
+  }
+  assert(Description.size() == 16 + Records.size() * 80 &&
+         "invalid AFN2 record serialization");
+
+  SmallVector<char, 0> Note;
+  auto appendNote32 = [&](uint32_t Value) {
+    for (unsigned Shift = 0; Shift != 32; Shift += 8)
+      Note.push_back(static_cast<char>(Value >> Shift));
+  };
+  appendNote32(8);
+  appendNote32(static_cast<uint32_t>(Description.size()));
+  appendNote32(0x41544641u);
+  Note.append({'A', 'T', 'F', 'i', 'e', 'l', 'd', '\0'});
+  Note.append(Description.begin(), Description.end());
+  while (Note.size() % 4)
+    Note.push_back(0);
+
+  auto Storage = std::make_unique<char[]>(sizeof(MCFragment) + Note.size());
+  auto *Fragment = new (Storage.get()) MCFragment(MCFragment::FT_Data);
+  Fragment->setParent(AtfieldManifestSection);
+  Fragment->FixedSize = Note.size();
+  std::memcpy(Fragment + 1, Note.data(), Note.size());
+  AtfieldManifestStorage.push_back(std::move(Storage));
+  MCSection::FragList *List = AtfieldManifestSection->curFragList();
+  if (List->Tail)
+    List->Tail->Next = Fragment;
+  else
+    List->Head = Fragment;
+  List->Tail = Fragment;
 }
 
 void MCAssembler::reportError(SMLoc L, const Twine &Msg) const {

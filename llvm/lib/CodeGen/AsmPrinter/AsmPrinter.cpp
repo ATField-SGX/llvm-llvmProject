@@ -23,6 +23,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
@@ -191,6 +192,34 @@ static cl::opt<bool> PrintLatency(
     "asm-print-latency",
     cl::desc("Print instruction latencies as verbose asm comments"), cl::Hidden,
     cl::init(false));
+
+static cl::opt<bool> AtfieldAnchorPreparation(
+    "atfield-anchor-preparation", cl::Hidden,
+    cl::desc("prepare stable C3 anchors in the MC relaxation loop"),
+    cl::init(false));
+static cl::opt<uint64_t> AtfieldPayloadOrdinal(
+    "atfield-payload-ordinal", cl::Hidden,
+    cl::desc("frozen ATField payload ordinal"), cl::init(0));
+
+static bool readAtfieldFunctionOrdinal(const Function &F, uint64_t &Ordinal) {
+  Attribute Attr = F.getFnAttribute("atfield-function-ordinal");
+  if (!Attr.isStringAttribute())
+    return false;
+  StringRef Value = Attr.getValueAsString();
+  if (Value.empty() || (Value.size() > 1 && Value.front() == '0'))
+    return false;
+  for (char C : Value)
+    if (C < '0' || C > '9')
+      return false;
+  return !Value.getAsInteger(10, Ordinal);
+}
+
+static uint64_t atfieldFunctionOrdinal(const Function &F) {
+  uint64_t Ordinal = 0;
+  if (!readAtfieldFunctionOrdinal(F, Ordinal))
+    F.getContext().emitError("invalid atfield-function-ordinal attribute");
+  return Ordinal;
+}
 
 extern cl::opt<bool> EmitBBHash;
 
@@ -490,6 +519,41 @@ void AsmPrinter::getAnalysisUsage(AnalysisUsage &AU) const {
 }
 
 bool AsmPrinter::doInitialization(Module &M) {
+  if (AtfieldAnchorPreparation) {
+    AtfieldNextUnitOrdinal = 0;
+    const Triple &AtfieldTarget = TM.getTargetTriple();
+    if (!AtfieldTarget.isOSBinFormatELF() ||
+        AtfieldTarget.getArch() != Triple::x86_64) {
+      M.getContext().emitError(
+          "atfield-anchor-preparation requires x86_64 ELF");
+      return true;
+    }
+    bool Valid = true;
+    SmallSet<uint64_t, 32> SeenOrdinals;
+    uint64_t ExpectedOrdinal = 0;
+    for (const Function &F : M) {
+      Attribute Attr = F.getFnAttribute("atfield-function-ordinal");
+      if (F.isDeclaration()) {
+        if (Attr.isStringAttribute()) {
+          M.getContext().emitError(
+              "atfield-function-ordinal is only valid on definitions");
+          Valid = false;
+        }
+        continue;
+      }
+      uint64_t Ordinal = 0;
+      if (!readAtfieldFunctionOrdinal(F, Ordinal) ||
+          Ordinal != ExpectedOrdinal ||
+          !SeenOrdinals.insert(Ordinal).second) {
+        M.getContext().emitError(
+            "definitions require dense unique atfield-function-ordinal values");
+        Valid = false;
+      }
+      ++ExpectedOrdinal;
+    }
+    if (!Valid)
+      return true;
+  }
   auto *MMIWP = getAnalysisIfAvailable<MachineModuleInfoWrapperPass>();
   MMI = MMIWP ? &MMIWP->getMMI() : nullptr;
   HasSplitStack = false;
@@ -1096,6 +1160,17 @@ void AsmPrinter::emitFunctionHeader() {
     Handler->beginFunction(MF);
     Handler->beginBasicBlockSection(MF->front());
   }
+
+  if (AtfieldAnchorPreparation)
+    AtfieldNextUnitOrdinal = 0;
+  if (AtfieldAnchorPreparation)
+    AtfieldPatchableOpPending = false;
+  if (AtfieldAnchorPreparation)
+    OutStreamer->emitAtfieldFunctionBegin(AtfieldPayloadOrdinal,
+                                          atfieldFunctionOrdinal(F));
+  if (AtfieldAnchorPreparation && F.hasPrologueData())
+    OutStreamer->emitAtfieldUnitBegin(false, AtfieldNextUnitOrdinal++, 1,
+                                      false);
 
   // Emit the prologue data.
   if (F.hasPrologueData())
@@ -2056,6 +2131,28 @@ void AsmPrinter::emitFunctionBody() {
       if (isVerbose())
         emitComments(MI, STI, OutStreamer->getCommentOS());
 
+      const bool AtfieldUnit =
+          AtfieldAnchorPreparation && !MI.isDebugInstr() &&
+          !MI.isPosition() && !MI.isImplicitDef() && !MI.isKill() &&
+          !MI.isBundledWithPred();
+      const bool AtfieldPatchableContinuation =
+          AtfieldPatchableOpPending && AtfieldUnit && !MI.isInlineAsm();
+      const bool AtfieldSourceAsmUnit = AtfieldUnit && MI.isInlineAsm();
+      const bool AtfieldPatchableUnit =
+          AtfieldUnit &&
+          (MI.getOpcode() == TargetOpcode::PATCHABLE_FUNCTION_ENTER ||
+           MI.getOpcode() == TargetOpcode::PATCHABLE_FUNCTION_EXIT ||
+           MI.getOpcode() == TargetOpcode::PATCHABLE_RET ||
+           MI.getOpcode() == TargetOpcode::PATCHABLE_TAIL_CALL ||
+           MI.getOpcode() == TargetOpcode::PATCHABLE_OP ||
+           MI.getOpcode() == TargetOpcode::PATCHABLE_EVENT_CALL ||
+           MI.getOpcode() == TargetOpcode::PATCHABLE_TYPED_EVENT_CALL);
+      if (AtfieldUnit && !AtfieldPatchableContinuation)
+        OutStreamer->emitAtfieldUnitBegin(
+            MI.isInlineAsm(), AtfieldNextUnitOrdinal++,
+            MI.isInlineAsm() ? 2 : (AtfieldPatchableUnit ? 3 : 1),
+            MI.isBundle());
+
       switch (MI.getOpcode()) {
       case TargetOpcode::CFI_INSTRUCTION:
         emitCFIInstruction(MI);
@@ -2189,6 +2286,16 @@ void AsmPrinter::emitFunctionBody() {
 
       for (auto &Handler : Handlers)
         Handler->endInstruction();
+      if (AtfieldSourceAsmUnit)
+        OutStreamer->emitAtfieldUnitEnd(AtfieldNextUnitOrdinal - 1);
+      if (AtfieldPatchableContinuation)
+        AtfieldPatchableOpPending = false;
+      if (AtfieldPatchableOpPending && AtfieldUnit &&
+          !AtfieldPatchableContinuation)
+        AtfieldPatchableOpPending = false;
+      if (AtfieldPatchableUnit && !AtfieldPatchableContinuation &&
+          MI.getOpcode() == TargetOpcode::PATCHABLE_OP)
+        AtfieldPatchableOpPending = true;
     }
     // Emit the last prefetch target in case the last instruction was a call.
     if (PrefetchTargetIt != PrefetchTargets.end() &&
@@ -2300,6 +2407,9 @@ void AsmPrinter::emitFunctionBody() {
 
   // Emit target-specific gunk after the function body.
   emitFunctionBodyEnd();
+
+  if (AtfieldAnchorPreparation)
+    OutStreamer->emitAtfieldFunctionEnd();
 
   // Even though wasm supports .type and .size in general, function symbols
   // are automatically sized.

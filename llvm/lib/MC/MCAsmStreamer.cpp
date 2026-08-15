@@ -179,6 +179,13 @@ public:
   }
 
   void emitLabel(MCSymbol *Symbol, SMLoc Loc = SMLoc()) override;
+  void emitAtfieldFunctionBegin(uint64_t PayloadOrdinal,
+                                uint64_t FunctionOrdinal) override;
+  void emitAtfieldFunctionEnd() override;
+  void emitAtfieldUnitBegin(bool SourceAsm, uint64_t UnitOrdinal,
+                            uint8_t UnitKind = 1,
+                            bool Bundle = false) override;
+  void emitAtfieldUnitEnd(uint64_t UnitOrdinal) override;
 
   void emitSubsectionsViaSymbols() override;
   void emitLinkerOptions(ArrayRef<std::string> Options) override;
@@ -569,6 +576,31 @@ void MCAsmStreamer::emitLabel(MCSymbol *Symbol, SMLoc Loc) {
   Symbol->print(OS, MAI);
   OS << MAI->getLabelSuffix();
 
+  EmitEOL();
+}
+
+void MCAsmStreamer::emitAtfieldFunctionBegin(uint64_t PayloadOrdinal,
+                                             uint64_t FunctionOrdinal) {
+  OS << "\t.atfield_function_begin " << PayloadOrdinal << ", "
+     << FunctionOrdinal;
+  EmitEOL();
+}
+
+void MCAsmStreamer::emitAtfieldFunctionEnd() {
+  OS << "\t.atfield_function_end";
+  EmitEOL();
+}
+
+void MCAsmStreamer::emitAtfieldUnitBegin(bool SourceAsm, uint64_t UnitOrdinal,
+                                         uint8_t UnitKind, bool Bundle) {
+  OS << "\t.atfield_unit_begin " << (SourceAsm ? 1 : 0) << ", "
+     << UnitOrdinal << ", " << static_cast<unsigned>(UnitKind) << ", "
+     << (Bundle ? 1 : 0);
+  EmitEOL();
+}
+
+void MCAsmStreamer::emitAtfieldUnitEnd(uint64_t UnitOrdinal) {
+  OS << "\t.atfield_unit_end " << UnitOrdinal;
   EmitEOL();
 }
 

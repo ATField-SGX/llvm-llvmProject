@@ -64,6 +64,8 @@ public:
     FT_SymbolId,
     FT_CVInlineLines,
     FT_CVDefRange,
+    FT_AtfieldAnchor,
+    FT_AtfieldMarker,
   };
 
 private:
@@ -509,6 +511,50 @@ public:
 
   static bool classof(const MCFragment *F) {
     return F->getKind() == MCFragment::FT_BoundaryAlign;
+  }
+};
+
+/// A zero-length ATField unit boundary or a monotonic seven-byte anchor.
+/// These fragments have no fixups and never split an emitted instruction unit.
+class MCAtfieldFragment : public MCFragment {
+public:
+  enum Role : uint8_t { Anchor, FunctionBegin, FunctionEnd };
+
+private:
+  Role FragmentRole;
+  bool Enabled = false;
+  bool SourceAsm = false;
+  uint64_t UnitOrdinal = 0;
+  uint8_t UnitKind = 1;
+  bool Bundle = false;
+  uint64_t PayloadOrdinal = 0;
+  uint64_t FunctionOrdinal = 0;
+
+public:
+  MCAtfieldFragment(Role Role, uint64_t Payload = 0, uint64_t Function = 0,
+                    bool IsSourceAsm = false, uint64_t Unit = 0,
+                    uint8_t Kind = 1, bool IsBundle = false)
+      : MCFragment(Role == Anchor ? FT_AtfieldAnchor : FT_AtfieldMarker),
+        FragmentRole(Role), SourceAsm(IsSourceAsm), UnitOrdinal(Unit),
+        UnitKind(Kind), Bundle(IsBundle), PayloadOrdinal(Payload),
+        FunctionOrdinal(Function) {}
+
+  Role getRole() const { return FragmentRole; }
+  bool isAnchor() const { return FragmentRole == Anchor; }
+  bool isFunctionBegin() const { return FragmentRole == FunctionBegin; }
+  bool isFunctionEnd() const { return FragmentRole == FunctionEnd; }
+  bool isEnabled() const { return Enabled; }
+  bool isSourceAsm() const { return SourceAsm; }
+  uint64_t getUnitOrdinal() const { return UnitOrdinal; }
+  uint8_t getUnitKind() const { return UnitKind; }
+  bool isBundle() const { return Bundle; }
+  uint64_t getPayloadOrdinal() const { return PayloadOrdinal; }
+  uint64_t getFunctionOrdinal() const { return FunctionOrdinal; }
+  void setEnabled() { Enabled = true; }
+
+  static bool classof(const MCFragment *F) {
+    return F->getKind() == MCFragment::FT_AtfieldAnchor ||
+           F->getKind() == MCFragment::FT_AtfieldMarker;
   }
 };
 
