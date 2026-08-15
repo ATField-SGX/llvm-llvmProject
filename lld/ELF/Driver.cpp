@@ -495,6 +495,8 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
     return;
   case file_magic::archive: {
     ATFieldArgumentContext archiveContext = getATFieldArgumentContext();
+    archiveContext.kind = ATFieldLinkArgumentKind::Archive;
+    setATFieldArgumentContext(archiveContext);
     const uint64_t archiveOccurrence =
         getATFieldInputObserver()
             ? translateATFieldArchiveOccurrence(
