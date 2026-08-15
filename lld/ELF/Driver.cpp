@@ -233,10 +233,23 @@ struct ATFieldArchiveMembers {
   bool thin = false;
 };
 
+static ATFieldPreparedInputReplacement
+requestATFieldPreparedInput(Ctx &ctx, const ATFieldPreparedInputKey &key) {
+  auto *provider = getATFieldPreparedInputProvider();
+  if (!provider)
+    return {};
+  Expected<ATFieldPreparedInputReplacement> replacement = provider->provide(key);
+  if (!replacement)
+    Fatal(ctx) << "prepared input provider failed: "
+               << toString(replacement.takeError());
+  return *replacement;
+}
+
 // Returns slices of MB by parsing MB as an archive file.
 // Each slice consists of a member file in the archive.
-static ATFieldArchiveMembers getArchiveMembers(Ctx &ctx,
-                                               MemoryBufferRef mb) {
+static ATFieldArchiveMembers
+getArchiveMembers(Ctx &ctx, MemoryBufferRef mb, uint64_t argumentOrdinal,
+                  uint64_t archiveOccurrence) {
   std::unique_ptr<Archive> file =
       CHECK(Archive::create(mb),
             mb.getBufferIdentifier() + ": failed to parse archive");
@@ -245,21 +258,43 @@ static ATFieldArchiveMembers getArchiveMembers(Ctx &ctx,
   result.thin = file->isThin();
   Error err = Error::success();
   bool addToTar = file->isThin() && ctx.tar;
+  const bool usePreparedInput =
+      getATFieldArgumentContext().active &&
+      getATFieldPreparedInputProvider() != nullptr;
   uint64_t memberOrdinal = 0;
   for (const Archive::Child &c : file->children(err)) {
     ++result.memberCount;
-    MemoryBufferRef mbref =
-        CHECK(c.getMemoryBufferRef(),
-              mb.getBufferIdentifier() +
-                  ": could not get the buffer for a child of the archive");
+    const uint64_t childOrdinal = memberOrdinal++;
     uint64_t childHeaderOffset = c.getChildOffset();
     uint64_t size = CHECK(c.getSize(), mb.getBufferIdentifier());
     StringRef name = CHECK(c.getName(), mb.getBufferIdentifier());
+    MemoryBufferRef mbref;
+    if (usePreparedInput) {
+      ATFieldPreparedInputKey key;
+      key.argumentOrdinal = argumentOrdinal;
+      key.archiveChildHeaderOffset = childHeaderOffset;
+      key.memberOrdinal = childOrdinal;
+      key.thinArchive = file->isThin();
+      key.archiveOccurrence = archiveOccurrence;
+      ATFieldPreparedInputReplacement replacement =
+          requestATFieldPreparedInput(ctx, key);
+      if (!replacement.eligible)
+        continue;
+      if (!replacement.replaced)
+        Fatal(ctx) << "prepared input provider did not provide eligible "
+                      "archive bytes";
+      mbref = replacement.contents;
+    } else {
+      mbref = CHECK(
+          c.getMemoryBufferRef(),
+          mb.getBufferIdentifier() +
+              ": could not get the buffer for a child of the archive");
+    }
     if (addToTar)
       ctx.tar->append(relativeToRoot(check(c.getFullName())),
                       mbref.getBuffer());
     result.members.push_back(
-        {mbref, childHeaderOffset, size, memberOrdinal++, name});
+        {mbref, childHeaderOffset, size, childOrdinal, name});
   }
   if (err)
     Fatal(ctx) << mb.getBufferIdentifier()
@@ -422,6 +457,22 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
     return;
   MemoryBufferRef mbref = *buffer;
 
+  ATFieldArgumentContext directContext = getATFieldArgumentContext();
+  if (identify_magic(mbref.getBuffer()) == file_magic::elf_relocatable &&
+      directContext.active &&
+      directContext.policy == ATFieldLinkArgumentPolicy::PreparedInput &&
+      directContext.kind == ATFieldLinkArgumentKind::DirectInput &&
+      directContext.archiveOccurrence == 0 &&
+      getATFieldPreparedInputProvider() != nullptr) {
+    ATFieldPreparedInputKey key;
+    key.argumentOrdinal = directContext.argumentOrdinal;
+    key.direct = true;
+    ATFieldPreparedInputReplacement replacement =
+        requestATFieldPreparedInput(ctx, key);
+    if (replacement.eligible && replacement.replaced)
+      mbref = replacement.contents;
+  }
+
   if (ctx.arg.formatBinary) {
     files.push_back(std::make_unique<BinaryFile>(ctx, mbref));
     return;
@@ -440,7 +491,9 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
                   nextATFieldArchiveEncounterOrdinal(
                       archiveContext.argumentOrdinal))
             : 0;
-    ATFieldArchiveMembers archive = getArchiveMembers(ctx, mbref);
+    ATFieldArchiveMembers archive =
+        getArchiveMembers(ctx, mbref, archiveContext.argumentOrdinal,
+                          archiveOccurrence);
     notifyATFieldArchiveEncounter(path, mbref, archive.memberCount,
                                   archive.thin, archiveOccurrence);
     if (inWholeArchive) {
