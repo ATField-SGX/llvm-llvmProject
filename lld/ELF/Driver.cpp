@@ -221,6 +221,7 @@ static std::tuple<ELFKind, uint16_t, uint8_t> parseEmulation(Ctx &ctx,
 
 struct ATFieldArchiveMember {
   MemoryBufferRef buffer;
+  MemoryBufferRef originalBuffer;
   uint64_t childHeaderOffset = 0;
   uint64_t size = 0;
   uint64_t memberOrdinal = 0;
@@ -258,8 +259,11 @@ getArchiveMembers(Ctx &ctx, MemoryBufferRef mb, uint64_t argumentOrdinal,
   result.thin = file->isThin();
   Error err = Error::success();
   bool addToTar = file->isThin() && ctx.tar;
+  const ATFieldArgumentContext context = getATFieldArgumentContext();
   const bool usePreparedInput =
-      getATFieldArgumentContext().active &&
+      context.active &&
+      context.policy == ATFieldLinkArgumentPolicy::PreparedInput &&
+      context.kind == ATFieldLinkArgumentKind::Archive &&
       getATFieldPreparedInputProvider() != nullptr;
   uint64_t memberOrdinal = 0;
   for (const Archive::Child &c : file->children(err)) {
@@ -268,7 +272,11 @@ getArchiveMembers(Ctx &ctx, MemoryBufferRef mb, uint64_t argumentOrdinal,
     uint64_t childHeaderOffset = c.getChildOffset();
     uint64_t size = CHECK(c.getSize(), mb.getBufferIdentifier());
     StringRef name = CHECK(c.getName(), mb.getBufferIdentifier());
-    MemoryBufferRef mbref;
+    MemoryBufferRef originalBuffer = CHECK(
+        c.getMemoryBufferRef(),
+        mb.getBufferIdentifier() +
+            ": could not get the buffer for a child of the archive");
+    MemoryBufferRef mbref = originalBuffer;
     if (usePreparedInput) {
       ATFieldPreparedInputKey key;
       key.argumentOrdinal = argumentOrdinal;
@@ -278,23 +286,20 @@ getArchiveMembers(Ctx &ctx, MemoryBufferRef mb, uint64_t argumentOrdinal,
       key.archiveOccurrence = archiveOccurrence;
       ATFieldPreparedInputReplacement replacement =
           requestATFieldPreparedInput(ctx, key);
-      if (!replacement.eligible)
-        continue;
-      if (!replacement.replaced)
-        Fatal(ctx) << "prepared input provider did not provide eligible "
-                      "archive bytes";
-      mbref = replacement.contents;
-    } else {
-      mbref = CHECK(
-          c.getMemoryBufferRef(),
-          mb.getBufferIdentifier() +
-              ": could not get the buffer for a child of the archive");
+      if (replacement.eligible) {
+        if (!replacement.replaced)
+          Fatal(ctx) << "prepared input provider did not provide eligible "
+                        "archive bytes";
+        mbref = replacement.contents;
+      } else {
+        mbref = originalBuffer;
+      }
     }
     if (addToTar)
       ctx.tar->append(relativeToRoot(check(c.getFullName())),
                       mbref.getBuffer());
     result.members.push_back(
-        {mbref, childHeaderOffset, size, childOrdinal, name});
+        {mbref, originalBuffer, childHeaderOffset, size, childOrdinal, name});
   }
   if (err)
     Fatal(ctx) << mb.getBufferIdentifier()
@@ -364,7 +369,8 @@ static void notifyATFieldDirectInput(InputFile *file, StringRef path,
   setATFieldArgumentContext(updated);
 }
 
-static void notifyATFieldDirectFile(InputFile *file, StringRef path) {
+static void notifyATFieldDirectFile(InputFile *file, StringRef path,
+                                    MemoryBufferRef originalContents) {
   if (!getATFieldInputObserver())
     return;
   setATFieldFileContext(
@@ -372,7 +378,7 @@ static void notifyATFieldDirectFile(InputFile *file, StringRef path) {
       file->lazy ? ATFieldInputInclusionReason::Lazy
                  : ATFieldInputInclusionReason::Direct,
       false);
-  notifyATFieldDirectInput(file, path, file->mb);
+  notifyATFieldDirectInput(file, path, originalContents);
 }
 
 static void notifyATFieldArchiveEncounter(
@@ -420,7 +426,7 @@ static void notifyATFieldArchiveMember(
   event.kind = getATFieldInputKind(file);
   event.archivePath = archivePath;
   event.memberName = member.name;
-  event.contents = member.buffer;
+  event.contents = member.originalBuffer;
   observer->onArchiveMemberCandidate(event);
   file->atfieldChildHeaderOffset = member.childHeaderOffset;
   file->atfieldMemberOrdinal = member.memberOrdinal;
@@ -456,6 +462,7 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
   if (!buffer)
     return;
   MemoryBufferRef mbref = *buffer;
+  const MemoryBufferRef originalBuffer = mbref;
 
   ATFieldArgumentContext directContext = getATFieldArgumentContext();
   if (identify_magic(mbref.getBuffer()) == file_magic::elf_relocatable &&
@@ -469,8 +476,12 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
     key.direct = true;
     ATFieldPreparedInputReplacement replacement =
         requestATFieldPreparedInput(ctx, key);
-    if (replacement.eligible && replacement.replaced)
+    if (replacement.eligible) {
+      if (!replacement.replaced)
+        Fatal(ctx) << "prepared input provider did not provide direct ET_REL "
+                      "bytes";
       mbref = replacement.contents;
+    }
   }
 
   if (ctx.arg.formatBinary) {
@@ -630,7 +641,7 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
     if (rejectATFieldBitcode(ctx, path))
       return;
     files.push_back(std::make_unique<BitcodeFile>(ctx, mbref, "", 0, inLib));
-    notifyATFieldDirectFile(files.back().get(), path);
+    notifyATFieldDirectFile(files.back().get(), path, originalBuffer);
     break;
   case file_magic::elf_relocatable:
     {
@@ -640,7 +651,7 @@ void LinkerDriver::addFile(StringRef path, bool withLOption) {
       if (files.size() == oldFileCount)
         return;
     }
-    notifyATFieldDirectFile(files.back().get(), path);
+    notifyATFieldDirectFile(files.back().get(), path, originalBuffer);
     break;
   default:
     ErrAlways(ctx) << path << ": unknown file type";
