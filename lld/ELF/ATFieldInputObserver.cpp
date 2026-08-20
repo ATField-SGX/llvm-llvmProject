@@ -386,19 +386,26 @@ void lld::elf::prepareATFieldInputSections(Ctx &ctx) noexcept {
         event.discardReason = ATFieldInputSectionDiscardReason::Script;
       }
 
+      bool sectionLive = section && section->isLive();
+      if (auto *merge = dyn_cast_or_null<MergeInputSection>(section))
+        sectionLive = sectionLive || llvm::any_of(
+                                         merge->pieces,
+                                         [](const SectionPiece &piece) {
+                                           return piece.live;
+                                         });
       if (forcedDiscard) {
         event.disposition = ATFieldInputSectionDisposition::Discarded;
         event.discarded = true;
       } else if (knownMetadata &&
                  (!section || section == &InputSection::discarded ||
-                  !section->isLive() || !section->getOutputSection())) {
+                  !sectionLive || !section->getOutputSection())) {
         event.disposition = ATFieldInputSectionDisposition::Metadata;
       } else if (!section) {
         ErrAlways(ctx) << "ATField section has no unique disposition";
         event.disposition = ATFieldInputSectionDisposition::Metadata;
-      } else if (!section->isLive() || !section->getOutputSection()) {
+      } else if (!sectionLive || !section->getOutputSection()) {
         event.disposition = ATFieldInputSectionDisposition::Dead;
-        event.live = section->isLive();
+        event.live = sectionLive;
       } else {
         event.disposition = ATFieldInputSectionDisposition::Retained;
         event.live = true;
@@ -503,6 +510,17 @@ static bool isATFieldPublishedWinner(Symbol *symbol) {
   if (!defined->section)
     return true;
   auto *input = llvm::dyn_cast<InputSectionBase>(defined->section);
+  if (auto *merge = dyn_cast_or_null<MergeInputSection>(input)) {
+    if (!merge->getOutputSection() ||
+        defined->value >= merge->content().size())
+      return false;
+    auto piece = llvm::upper_bound(
+        merge->pieces, defined->value,
+        [](uint64_t value, const SectionPiece &item) {
+          return value < item.inputOff;
+        });
+    return piece != merge->pieces.begin() && (--piece)->live;
+  }
   return input && input != &InputSection::discarded && input->isLive() &&
          input->getOutputSection();
 }
