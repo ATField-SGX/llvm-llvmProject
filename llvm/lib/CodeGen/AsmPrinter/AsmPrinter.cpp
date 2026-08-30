@@ -971,7 +971,8 @@ void AsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
   if (AtfieldAnchorPreparation && TM.getDataSections() &&
       GV->hasLocalLinkage() &&
       !GV->hasComdat() && !GV->hasAppendingLinkage() &&
-      !GV->isThreadLocal() && !GVKind.isCommon() &&
+      !GV->isThreadLocal() && !GV->isExternallyInitialized() &&
+      !GVKind.isCommon() &&
       !GVKind.isBSS()) {
     const auto Ordinal = AtfieldGlobalOrdinals.find(GV);
     SmallVector<uint8_t, 64> InitializerBytes;
