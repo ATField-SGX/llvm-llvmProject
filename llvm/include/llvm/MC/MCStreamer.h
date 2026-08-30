@@ -489,6 +489,15 @@ public:
                                     uint8_t UnitKind = 1,
                                     bool Bundle = false) {}
   virtual void emitAtfieldUnitEnd(uint64_t UnitOrdinal) {}
+  virtual void emitAtfieldGlobal(uint64_t PayloadOrdinal,
+                                 uint64_t GlobalOrdinal, MCSymbol *Symbol,
+                                 uint64_t Size, uint64_t Alignment,
+                                 uint64_t ElementWidth,
+                                 uint64_t ElementCount,
+                                 uint64_t ElementStride,
+                                 ArrayRef<uint8_t> GlobalGuid,
+                                 ArrayRef<uint8_t> InitializerDigest,
+                                 uint32_t Flags) {}
 
   virtual void emitEHSymAttributes(const MCSymbol *Symbol, MCSymbol *EHSymbol);
 

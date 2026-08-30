@@ -1020,6 +1020,8 @@ uint64_t ELFWriter::writeObject() {
     const uint64_t SecStart = align(Section.getAlign());
 
     const MCSymbolELF *SignatureSymbol = Section.getGroup();
+    if (Asm.getAtfieldGlobalSection() == &Section)
+      Asm.patchAtfieldGlobalSectionOrdinals();
     writeSectionData(Section);
 
     uint64_t SecEnd = W.OS.tell();

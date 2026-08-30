@@ -120,6 +120,7 @@
 #include "llvm/Support/Format.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/SHA256.h"
 #include "llvm/Support/VCSRevision.h"
 #include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/Support/raw_ostream.h"
@@ -219,6 +220,72 @@ static uint64_t atfieldFunctionOrdinal(const Function &F) {
   if (!readAtfieldFunctionOrdinal(F, Ordinal))
     F.getContext().emitError("invalid atfield-function-ordinal attribute");
   return Ordinal;
+}
+
+static bool atfieldAppendConstantBytes(const DataLayout &DL,
+                                       const Constant *Value,
+                                       SmallVectorImpl<uint8_t> &Bytes) {
+  if (const auto *Integer = dyn_cast<ConstantInt>(Value)) {
+    const TypeSize Size = DL.getTypeStoreSize(Integer->getType());
+    if (Size.isScalable() || Size.getFixedValue() > sizeof(uint64_t))
+      return false;
+    uint64_t Raw = Integer->getValue().getZExtValue();
+    for (uint64_t I = 0; I != Size.getFixedValue(); ++I) {
+      Bytes.push_back(static_cast<uint8_t>(Raw));
+      Raw >>= 8;
+    }
+    return true;
+  }
+  if (isa<ConstantAggregateZero>(Value)) {
+    const TypeSize Size = DL.getTypeAllocSize(Value->getType());
+    if (Size.isScalable())
+      return false;
+    Bytes.append(Size.getFixedValue(), 0);
+    return true;
+  }
+  if (const auto *Sequential = dyn_cast<ConstantDataSequential>(Value)) {
+    for (unsigned I = 0; I != Sequential->getNumElements(); ++I)
+      if (!atfieldAppendConstantBytes(DL, Sequential->getElementAsConstant(I),
+                                      Bytes))
+        return false;
+    return true;
+  }
+  if (const auto *Array = dyn_cast<ConstantArray>(Value)) {
+    for (const Use &Element : Array->operands())
+      if (!atfieldAppendConstantBytes(DL, cast<Constant>(Element), Bytes))
+        return false;
+    return true;
+  }
+  return false;
+}
+
+static bool atfieldElementShape(const DataLayout &DL, Type *ValueType,
+                                uint64_t &Width, uint64_t &Count,
+                                uint64_t &Stride) {
+  Count = 1;
+  Type *ElementType = ValueType;
+  if (auto *Array = dyn_cast<ArrayType>(ValueType)) {
+    Count = Array->getNumElements();
+    ElementType = Array->getElementType();
+  } else if (auto *Vector = dyn_cast<FixedVectorType>(ValueType)) {
+    Count = Vector->getNumElements();
+    ElementType = Vector->getElementType();
+  }
+  const TypeSize ElementSize = DL.getTypeAllocSize(ElementType);
+  if (ElementSize.isScalable() || ElementSize.getFixedValue() == 0)
+    return false;
+  Width = Stride = ElementSize.getFixedValue();
+  return true;
+}
+
+static std::array<uint8_t, 32> atfieldGlobalGuid(uint64_t Payload,
+                                                 uint64_t Ordinal) {
+  std::array<uint8_t, 16> Key{};
+  for (unsigned Shift = 0; Shift != 64; Shift += 8) {
+    Key[Shift / 8] = static_cast<uint8_t>(Payload >> Shift);
+    Key[8 + Shift / 8] = static_cast<uint8_t>(Ordinal >> Shift);
+  }
+  return SHA256::hash(Key);
 }
 
 extern cl::opt<bool> EmitBBHash;
@@ -554,6 +621,12 @@ bool AsmPrinter::doInitialization(Module &M) {
     if (!Valid)
       return true;
   }
+  AtfieldGlobalOrdinals.clear();
+  AtfieldNextGlobalOrdinal = 0;
+  if (AtfieldAnchorPreparation)
+    for (const GlobalVariable &GV : M.globals())
+      if (!GV.isDeclaration() && GV.hasInitializer())
+        AtfieldGlobalOrdinals[&GV] = AtfieldNextGlobalOrdinal++;
   auto *MMIWP = getAnalysisIfAvailable<MachineModuleInfoWrapperPass>();
   MMI = MMIWP ? &MMIWP->getMMI() : nullptr;
   HasSplitStack = false;
@@ -895,8 +968,37 @@ void AsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
 
   // Determine to which section this global should be emitted.
   MCSection *TheSection = getObjFileLowering().SectionForGlobal(GV, GVKind, TM);
+  if (AtfieldAnchorPreparation && TM.getDataSections() &&
+      GV->hasLocalLinkage() &&
+      !GV->hasComdat() && !GV->hasAppendingLinkage() &&
+      !GV->isThreadLocal() && !GVKind.isCommon() &&
+      !GVKind.isBSS()) {
+    const auto Ordinal = AtfieldGlobalOrdinals.find(GV);
+    SmallVector<uint8_t, 64> InitializerBytes;
+    uint64_t ElementWidth = 0, ElementCount = 0, ElementStride = 0;
+    if (Ordinal != AtfieldGlobalOrdinals.end() &&
+        atfieldAppendConstantBytes(DL, GV->getInitializer(), InitializerBytes) &&
+        InitializerBytes.size() == Size &&
+        atfieldElementShape(DL, GV->getValueType(), ElementWidth,
+                            ElementCount, ElementStride)) {
+      const auto GlobalGuid =
+          atfieldGlobalGuid(AtfieldPayloadOrdinal, Ordinal->second);
+      const auto InitializerDigest = SHA256::hash(InitializerBytes);
+      uint32_t Flags = GV->isConstant() ? 1u : 0u;
+      if (GV->hasGlobalUnnamedAddr())
+        Flags |= 2u;
+      Flags |= 4u | 8u | 16u;
+      OutStreamer->emitAtfieldGlobal(
+          AtfieldPayloadOrdinal, Ordinal->second, GVSym, Size,
+          Alignment.value(), ElementWidth, ElementCount, ElementStride,
+          ArrayRef<uint8_t>(GlobalGuid.data(), GlobalGuid.size()),
+          ArrayRef<uint8_t>(InitializerDigest.data(),
+                            InitializerDigest.size()),
+          Flags);
+    }
+  }
 
-  // If we have a bss global going to a section that supports the
+  // If this is a BSS global going to a section that supports the
   // zerofill directive, do so here.
   if (GVKind.isBSS() && MAI->isMachO() && TheSection->isBssSection()) {
     if (Size == 0)

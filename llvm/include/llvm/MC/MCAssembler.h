@@ -19,6 +19,7 @@
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/SMLoc.h"
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -63,6 +64,8 @@ private:
   SectionListType Sections;
   MCSection *AtfieldManifestSection = nullptr;
   SmallVector<std::unique_ptr<char[]>, 0> AtfieldManifestStorage;
+  MCSection *AtfieldGlobalSection = nullptr;
+  SmallVector<std::unique_ptr<char[]>, 0> AtfieldGlobalStorage;
   struct AtfieldManifestRecord {
     uint8_t Tag = 1;
     uint8_t Kind = 0;
@@ -76,6 +79,20 @@ private:
     uint64_t End = 0;
   };
   SmallVector<AtfieldManifestRecord, 0> AtfieldManifestRecords;
+  struct AtfieldGlobalRecord {
+    uint64_t Payload = 0;
+    uint64_t Ordinal = 0;
+    const MCSymbol *Symbol = nullptr;
+    uint64_t Size = 0;
+    uint64_t Alignment = 1;
+    uint64_t ElementWidth = 0;
+    uint64_t ElementCount = 0;
+    uint64_t ElementStride = 0;
+    std::array<uint8_t, 32> GlobalGuid{};
+    std::array<uint8_t, 32> InitializerDigest{};
+    uint32_t Flags = 0;
+  };
+  SmallVector<AtfieldGlobalRecord, 0> AtfieldGlobalRecords;
 
   SmallVector<const MCSymbol *, 0> Symbols;
 
@@ -133,8 +150,12 @@ private:
   bool prepareAtfieldAnchors();
   void emitAtfieldSymbols();
   void emitAtfieldManifest();
+  void emitAtfieldGlobalManifest();
 
 public:
+  void patchAtfieldGlobalSectionOrdinals();
+  MCSection *getAtfieldGlobalSection() const { return AtfieldGlobalSection; }
+
   /// Construct a new assembler instance.
   //
   // FIXME: How are we going to parameterize this? Two obvious options are stay
@@ -145,6 +166,13 @@ public:
                        std::unique_ptr<MCAsmBackend> Backend,
                        std::unique_ptr<MCCodeEmitter> Emitter,
                        std::unique_ptr<MCObjectWriter> Writer);
+  void recordAtfieldGlobal(uint64_t Payload, uint64_t Ordinal,
+                           const MCSymbol *Symbol, uint64_t Size,
+                           uint64_t Alignment, uint64_t ElementWidth,
+                           uint64_t ElementCount, uint64_t ElementStride,
+                           ArrayRef<uint8_t> GlobalGuid,
+                           ArrayRef<uint8_t> InitializerDigest,
+                           uint32_t Flags);
   MCAssembler(const MCAssembler &) = delete;
   MCAssembler &operator=(const MCAssembler &) = delete;
 

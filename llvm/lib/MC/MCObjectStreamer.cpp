@@ -95,6 +95,16 @@ void MCObjectStreamer::emitAtfieldUnitBegin(bool SourceAsm,
                                          Bundle);
 }
 
+void MCObjectStreamer::emitAtfieldGlobal(
+    uint64_t PayloadOrdinal, uint64_t GlobalOrdinal, MCSymbol *Symbol,
+    uint64_t Size, uint64_t Alignment, uint64_t ElementWidth,
+    uint64_t ElementCount, uint64_t ElementStride, ArrayRef<uint8_t> GlobalGuid,
+    ArrayRef<uint8_t> InitializerDigest, uint32_t Flags) {
+  getAssembler().recordAtfieldGlobal(
+      PayloadOrdinal, GlobalOrdinal, Symbol, Size, Alignment, ElementWidth,
+      ElementCount, ElementStride, GlobalGuid, InitializerDigest, Flags);
+}
+
 void MCObjectStreamer::ensureHeadroom(size_t Headroom) {
   if (Headroom <= FragSpace)
     return;

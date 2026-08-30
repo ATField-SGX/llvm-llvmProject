@@ -69,6 +69,12 @@ class MCAsmStreamer final : public MCStreamer {
                                raw_svector_ostream &OS) const;
   void emitCFIStartProcImpl(MCDwarfFrameInfo &Frame) override;
   void emitCFIEndProcImpl(MCDwarfFrameInfo &Frame) override;
+  void emitAtfieldGlobal(uint64_t PayloadOrdinal, uint64_t GlobalOrdinal,
+                         MCSymbol *Symbol, uint64_t Size, uint64_t Alignment,
+                         uint64_t ElementWidth, uint64_t ElementCount,
+                         uint64_t ElementStride, ArrayRef<uint8_t> GlobalGuid,
+                         ArrayRef<uint8_t> InitializerDigest,
+                         uint32_t Flags) override;
 
 public:
   MCAsmStreamer(MCContext &Context, std::unique_ptr<formatted_raw_ostream> os,
@@ -601,6 +607,31 @@ void MCAsmStreamer::emitAtfieldUnitBegin(bool SourceAsm, uint64_t UnitOrdinal,
 
 void MCAsmStreamer::emitAtfieldUnitEnd(uint64_t UnitOrdinal) {
   OS << "\t.atfield_unit_end " << UnitOrdinal;
+  EmitEOL();
+}
+
+void MCAsmStreamer::emitAtfieldGlobal(
+    uint64_t PayloadOrdinal, uint64_t GlobalOrdinal, MCSymbol *Symbol,
+    uint64_t Size, uint64_t Alignment, uint64_t ElementWidth,
+    uint64_t ElementCount, uint64_t ElementStride, ArrayRef<uint8_t> GlobalGuid,
+    ArrayRef<uint8_t> InitializerDigest, uint32_t Flags) {
+  if (!Symbol || GlobalGuid.size() != 32 || InitializerDigest.size() != 32) {
+    getContext().reportError(SMLoc(), "invalid ATField global metadata");
+    return;
+  }
+  OS << "\t.atfield_global " << PayloadOrdinal << ", " << GlobalOrdinal
+     << ", ";
+  Symbol->print(OS, MAI);
+  OS << ", " << Size << ", " << Alignment << ", " << ElementWidth << ", "
+     << ElementCount << ", " << ElementStride << ", " << Flags << ", ";
+  static constexpr char Hex[] = "0123456789abcdef";
+  OS << '"';
+  for (uint8_t Byte : GlobalGuid)
+    OS << Hex[Byte >> 4] << Hex[Byte & 0xf];
+  OS << "\", \"";
+  for (uint8_t Byte : InitializerDigest)
+    OS << Hex[Byte >> 4] << Hex[Byte & 0xf];
+  OS << '"';
   EmitEOL();
 }
 

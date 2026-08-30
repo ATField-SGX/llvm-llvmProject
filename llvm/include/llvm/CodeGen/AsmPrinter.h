@@ -129,6 +129,9 @@ public:
 
   /// Dense source-assembly unit ordinal stream for ATField parser validation.
   uint64_t AtfieldNextUnitOrdinal = 0;
+  /// Deterministic module-local ordinals for emitted global provenance records.
+  DenseMap<const GlobalVariable *, uint64_t> AtfieldGlobalOrdinals;
+  uint64_t AtfieldNextGlobalOrdinal = 0;
 
   /// PATCHABLE_OP shares one indivisible ATField unit with its next emitted MI.
   bool AtfieldPatchableOpPending = false;

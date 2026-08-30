@@ -120,6 +120,12 @@ public:
   void emitAtfieldUnitBegin(bool SourceAsm, uint64_t UnitOrdinal,
                             uint8_t UnitKind = 1,
                             bool Bundle = false) override;
+  void emitAtfieldGlobal(uint64_t PayloadOrdinal, uint64_t GlobalOrdinal,
+                         MCSymbol *Symbol, uint64_t Size, uint64_t Alignment,
+                         uint64_t ElementWidth, uint64_t ElementCount,
+                         uint64_t ElementStride, ArrayRef<uint8_t> GlobalGuid,
+                         ArrayRef<uint8_t> InitializerDigest,
+                         uint32_t Flags) override;
   virtual void emitLabelAtPos(MCSymbol *Symbol, SMLoc Loc, MCFragment &F,
                               uint64_t Offset);
   void emitAssignment(MCSymbol *Symbol, const MCExpr *Value) override;

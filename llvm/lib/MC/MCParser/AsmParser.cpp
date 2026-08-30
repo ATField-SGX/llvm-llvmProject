@@ -533,6 +533,7 @@ private:
     DK_ATFIELD_FUNCTION_END,
     DK_ATFIELD_UNIT_BEGIN,
     DK_ATFIELD_UNIT_END,
+    DK_ATFIELD_GLOBAL,
     DK_BASE64,
     DK_END
   };
@@ -624,6 +625,7 @@ private:
   bool parseDirectiveAtfieldFunctionEnd(SMLoc DirectiveLoc);
   bool parseDirectiveAtfieldUnitBegin(SMLoc DirectiveLoc);
   bool parseDirectiveAtfieldUnitEnd(SMLoc DirectiveLoc);
+  bool parseDirectiveAtfieldGlobal(SMLoc DirectiveLoc);
   bool parseAtfieldOrdinal(uint64_t &Ordinal, SMLoc DirectiveLoc);
 
   // macro directives
@@ -2225,6 +2227,8 @@ bool AsmParser::parseStatement(ParseStatementInfo &Info,
       return parseDirectiveAtfieldUnitBegin(IDLoc);
     case DK_ATFIELD_UNIT_END:
       return parseDirectiveAtfieldUnitEnd(IDLoc);
+    case DK_ATFIELD_GLOBAL:
+      return parseDirectiveAtfieldGlobal(IDLoc);
     }
 
     return Error(IDLoc, "unknown directive");
@@ -3172,6 +3176,57 @@ bool AsmParser::parseDirectiveAtfieldUnitEnd(SMLoc DirectiveLoc) {
     return Error(DirectiveLoc, "mismatched ATField source assembly unit ordinal");
   AtfieldSourceAsmUnit = false;
   getStreamer().emitAtfieldUnitEnd(AtfieldActiveUnitOrdinal);
+  return false;
+}
+
+bool AsmParser::parseDirectiveAtfieldGlobal(SMLoc DirectiveLoc) {
+  if (AtfieldSourceAsmUnit)
+    return Error(DirectiveLoc,
+                 "ATField global is forbidden in source-asm units");
+  uint64_t Payload = 0, Ordinal = 0, Size = 0, Alignment = 0;
+  uint64_t Width = 0, Count = 0, Stride = 0, Flags = 0;
+  StringRef SymbolName, Guid, Digest;
+  if (parseAtfieldOrdinal(Payload, DirectiveLoc) || parseComma() ||
+      parseAtfieldOrdinal(Ordinal, DirectiveLoc) || parseComma() ||
+      parseIdentifier(SymbolName) || parseComma() ||
+      parseAtfieldOrdinal(Size, DirectiveLoc) || parseComma() ||
+      parseAtfieldOrdinal(Alignment, DirectiveLoc) || parseComma() ||
+      parseAtfieldOrdinal(Width, DirectiveLoc) || parseComma() ||
+      parseAtfieldOrdinal(Count, DirectiveLoc) || parseComma() ||
+      parseAtfieldOrdinal(Stride, DirectiveLoc) || parseComma() ||
+      parseAtfieldOrdinal(Flags, DirectiveLoc) || parseComma())
+    return true;
+  if (getTok().isNot(AsmToken::String))
+    return Error(DirectiveLoc, "ATField global GUID must be quoted hex");
+  Guid = getTok().getStringContents();
+  Lex();
+  if (parseComma() || getTok().isNot(AsmToken::String))
+    return Error(DirectiveLoc, "ATField global digest must be quoted hex");
+  Digest = getTok().getStringContents();
+  Lex();
+  if (parseEOL())
+    return true;
+  if (Flags > std::numeric_limits<uint32_t>::max() ||
+      (Flags & ~uint64_t{31}) != 0 ||
+      Guid.size() != 64 || Digest.size() != 64)
+    return Error(DirectiveLoc, "ATField global digest has invalid length");
+  SmallVector<uint8_t, 32> GuidBytes;
+  SmallVector<uint8_t, 32> DigestBytes;
+  auto decode = [&](StringRef Text, SmallVectorImpl<uint8_t> &Out) {
+    for (unsigned I = 0; I < Text.size(); I += 2) {
+      unsigned Value = 0;
+      if (Text.substr(I, 2).getAsInteger(16, Value))
+        return false;
+      Out.push_back(static_cast<uint8_t>(Value));
+    }
+    return true;
+  };
+  if (!decode(Guid, GuidBytes) || !decode(Digest, DigestBytes))
+    return Error(DirectiveLoc, "ATField global digest is not hexadecimal");
+  MCSymbol *Symbol = getContext().getOrCreateSymbol(SymbolName);
+  getStreamer().emitAtfieldGlobal(Payload, Ordinal, Symbol, Size, Alignment,
+                                  Width, Count, Stride, GuidBytes, DigestBytes,
+                                  static_cast<uint32_t>(Flags));
   return false;
 }
 
@@ -5638,6 +5693,7 @@ void AsmParser::initializeDirectiveKindMap() {
   DirectiveKindMap[".atfield_function_end"] = DK_ATFIELD_FUNCTION_END;
   DirectiveKindMap[".atfield_unit_begin"] = DK_ATFIELD_UNIT_BEGIN;
   DirectiveKindMap[".atfield_unit_end"] = DK_ATFIELD_UNIT_END;
+  DirectiveKindMap[".atfield_global"] = DK_ATFIELD_GLOBAL;
 }
 
 MCAsmMacro *AsmParser::parseMacroLikeBody(SMLoc DirectiveLoc) {

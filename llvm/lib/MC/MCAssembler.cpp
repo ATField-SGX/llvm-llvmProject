@@ -27,7 +27,6 @@
 #include "llvm/MC/MCSFrame.h"
 #include "llvm/MC/MCSection.h"
 #include "llvm/MC/MCSectionELF.h"
-#include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MCSymbolELF.h"
 #include "llvm/MC/MCValue.h"
@@ -231,6 +230,9 @@ void MCAssembler::reset() {
   AtfieldManifestSection = nullptr;
   AtfieldManifestStorage.clear();
   AtfieldManifestRecords.clear();
+  AtfieldGlobalSection = nullptr;
+  AtfieldGlobalStorage.clear();
+  AtfieldGlobalRecords.clear();
   Symbols.clear();
   ThumbFuncs.clear();
 
@@ -241,6 +243,37 @@ void MCAssembler::reset() {
     getEmitterPtr()->reset();
   if (Writer)
     Writer->reset();
+}
+
+void MCAssembler::recordAtfieldGlobal(
+    uint64_t Payload, uint64_t Ordinal, const MCSymbol *Symbol, uint64_t Size,
+    uint64_t Alignment, uint64_t ElementWidth, uint64_t ElementCount,
+    uint64_t ElementStride, ArrayRef<uint8_t> GlobalGuid,
+    ArrayRef<uint8_t> InitializerDigest, uint32_t Flags) {
+  AtfieldGlobalRecord Record;
+  Record.Payload = Payload;
+  Record.Ordinal = Ordinal;
+  Record.Symbol = Symbol;
+  Record.Size = Size;
+  Record.Alignment = Alignment;
+  Record.ElementWidth = ElementWidth;
+  Record.ElementCount = ElementCount;
+  Record.ElementStride = ElementStride;
+  Record.Flags = Flags;
+  if (GlobalGuid.size() != Record.GlobalGuid.size() ||
+      InitializerDigest.size() != Record.InitializerDigest.size()) {
+    recordError(SMLoc(), "invalid ATField global provenance digest");
+    return;
+  }
+  for (const AtfieldGlobalRecord &Existing : AtfieldGlobalRecords)
+    if (Existing.Payload == Payload && Existing.Ordinal == Ordinal) {
+      recordError(SMLoc(), "duplicate ATField global provenance ordinal");
+      return;
+    }
+  std::copy(GlobalGuid.begin(), GlobalGuid.end(), Record.GlobalGuid.begin());
+  std::copy(InitializerDigest.begin(), InitializerDigest.end(),
+            Record.InitializerDigest.begin());
+  AtfieldGlobalRecords.push_back(Record);
 }
 
 bool MCAssembler::registerSection(MCSection &Section) {
@@ -801,6 +834,18 @@ void MCAssembler::layout() {
     }
     registerSection(*AtfieldManifestSection);
   }
+  if (!AtfieldGlobalRecords.empty() && !AtfieldGlobalSection &&
+      Context.getTargetTriple().isOSBinFormatELF()) {
+    AtfieldGlobalSection =
+        Context.getELFSection(".note.atfield.globals", ELF::SHT_NOTE, 0);
+    AtfieldGlobalSection->setAlignment(Align(4));
+    if (!AtfieldGlobalSection->CurFragList) {
+      AtfieldGlobalSection->Subsections.push_back({0u, MCSection::FragList{}});
+      AtfieldGlobalSection->CurFragList =
+          &AtfieldGlobalSection->Subsections.back().second;
+    }
+    registerSection(*AtfieldGlobalSection);
+  }
 
   // Assign section ordinals.
   unsigned SectionIndex = 0;
@@ -871,6 +916,7 @@ void MCAssembler::layout() {
   }
   emitAtfieldSymbols();
   emitAtfieldManifest();
+  emitAtfieldGlobalManifest();
 
   flushPendingErrors();
 
@@ -1588,6 +1634,132 @@ void MCAssembler::emitAtfieldSymbols() {
            Begin,
            End});
     }
+  }
+}
+
+void MCAssembler::emitAtfieldGlobalManifest() {
+  if (!AtfieldGlobalSection)
+    return;
+  struct Record {
+    uint64_t Payload, Ordinal, Offset, Size, Alignment, ElementWidth;
+    uint64_t ElementCount, ElementStride;
+    uint32_t Section, Flags;
+    std::array<uint8_t, 32> GlobalGuid, InitializerDigest;
+  };
+  SmallVector<Record, 16> Records;
+  llvm::sort(AtfieldGlobalRecords, [](const AtfieldGlobalRecord &Left,
+                                      const AtfieldGlobalRecord &Right) {
+    return std::tie(Left.Payload, Left.Ordinal) <
+           std::tie(Right.Payload, Right.Ordinal);
+  });
+  for (const AtfieldGlobalRecord &Entry : AtfieldGlobalRecords) {
+    if (!Entry.Symbol || !Entry.Symbol->isDefined() ||
+        Entry.Symbol->isVariable() || !Entry.Symbol->getFragment() ||
+        !Entry.Symbol->getFragment()->getParent()) {
+      recordError(SMLoc(), "ATField global has no materialized locator");
+      return;
+    }
+    const MCFragment &Fragment = *Entry.Symbol->getFragment();
+    const MCSection &Section = *Fragment.getParent();
+    const uint64_t FragmentOffset = getFragmentOffset(Fragment);
+    const uint64_t Offset = FragmentOffset + Entry.Symbol->getOffset();
+    if (Offset < FragmentOffset || Offset > getSectionAddressSize(Section) ||
+        Entry.Size > getSectionAddressSize(Section) - Offset ||
+        Entry.Alignment == 0 || Entry.ElementWidth == 0 ||
+        Entry.ElementCount == 0 || Entry.ElementStride < Entry.ElementWidth) {
+      recordError(SMLoc(), "invalid ATField global locator or element shape");
+      return;
+    }
+    Records.push_back({Entry.Payload, Entry.Ordinal, Offset, Entry.Size,
+                       Entry.Alignment, Entry.ElementWidth, Entry.ElementCount,
+                       Entry.ElementStride, Section.getOrdinal(), Entry.Flags,
+                       Entry.GlobalGuid, Entry.InitializerDigest});
+  }
+  if (Records.size() > std::numeric_limits<uint32_t>::max()) {
+    recordError(SMLoc(), "ATField global manifest has too many records");
+    return;
+  }
+  SmallVector<char, 0> Description;
+  auto append16 = [&](uint16_t Value) {
+    Description.push_back(static_cast<char>(Value));
+    Description.push_back(static_cast<char>(Value >> 8));
+  };
+  auto append32 = [&](uint32_t Value) {
+    for (unsigned Shift = 0; Shift != 32; Shift += 8)
+      Description.push_back(static_cast<char>(Value >> Shift));
+  };
+  auto append64 = [&](uint64_t Value) {
+    for (unsigned Shift = 0; Shift != 64; Shift += 8)
+      Description.push_back(static_cast<char>(Value >> Shift));
+  };
+  append32(0x32474641u);
+  append16(1);
+  append16(136);
+  append32(static_cast<uint32_t>(Records.size()));
+  append32(0);
+  for (const Record &Entry : Records) {
+    append64(Entry.Payload);
+    append64(Entry.Ordinal);
+    append32(Entry.Section);
+    append32(Entry.Flags);
+    append64(Entry.Offset);
+    append64(Entry.Size);
+    append64(Entry.Alignment);
+    append64(Entry.ElementWidth);
+    append64(Entry.ElementCount);
+    append64(Entry.ElementStride);
+    for (uint8_t Byte : Entry.GlobalGuid)
+      Description.push_back(static_cast<char>(Byte));
+    for (uint8_t Byte : Entry.InitializerDigest)
+      Description.push_back(static_cast<char>(Byte));
+  }
+  SmallVector<char, 0> Note;
+  auto appendNote32 = [&](uint32_t Value) {
+    for (unsigned Shift = 0; Shift != 32; Shift += 8)
+      Note.push_back(static_cast<char>(Value >> Shift));
+  };
+  appendNote32(8);
+  appendNote32(static_cast<uint32_t>(Description.size()));
+  appendNote32(0x41544641u);
+  Note.append({'A', 'T', 'F', 'i', 'e', 'l', 'd', '\0'});
+  Note.append(Description.begin(), Description.end());
+  while (Note.size() % 4)
+    Note.push_back(0);
+  auto Storage = std::make_unique<char[]>(sizeof(MCFragment) + Note.size());
+  auto *Fragment = new (Storage.get()) MCFragment(MCFragment::FT_Data);
+  Fragment->setParent(AtfieldGlobalSection);
+  Fragment->FixedSize = Note.size();
+  std::memcpy(Fragment + 1, Note.data(), Note.size());
+  AtfieldGlobalStorage.push_back(std::move(Storage));
+  MCSection::FragList *List = AtfieldGlobalSection->curFragList();
+  if (List->Tail)
+    List->Tail->Next = Fragment;
+  else
+    List->Head = Fragment;
+  List->Tail = Fragment;
+}
+
+void MCAssembler::patchAtfieldGlobalSectionOrdinals() {
+  if (!AtfieldGlobalSection || AtfieldGlobalStorage.empty())
+    return;
+  auto *Fragment =
+      reinterpret_cast<MCFragment *>(AtfieldGlobalStorage.back().get());
+  auto *Bytes = reinterpret_cast<uint8_t *>(Fragment) + sizeof(MCFragment);
+  for (std::size_t Index = 0; Index != AtfieldGlobalRecords.size(); ++Index) {
+    const MCSymbol *Symbol = AtfieldGlobalRecords[Index].Symbol;
+    const MCFragment *SymbolFragment =
+        Symbol ? Symbol->getFragment() : nullptr;
+    const MCSection *Section =
+        SymbolFragment ? SymbolFragment->getParent() : nullptr;
+    if (!Section || Section->getOrdinal() == std::numeric_limits<unsigned>::max()) {
+      recordError(SMLoc(), "ATField global has no section ordinal");
+      return;
+    }
+    const unsigned SectionIndex = Section->getOrdinal();
+    const std::size_t Offset = 20 + 16 + Index * 136 + 16;
+    for (unsigned Shift = 0; Shift != 32; Shift += 8)
+      Bytes[Offset + Shift / 8] =
+          static_cast<uint8_t>(SectionIndex >> Shift);
   }
 }
 
