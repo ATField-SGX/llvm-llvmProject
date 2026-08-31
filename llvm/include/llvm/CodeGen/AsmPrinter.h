@@ -129,6 +129,10 @@ public:
 
   /// Dense source-assembly unit ordinal stream for ATField parser validation.
   uint64_t AtfieldNextUnitOrdinal = 0;
+  /// Module-definition order ordinals used when anchor-only IR has no
+  /// product-side function attributes.
+  DenseMap<const Function *, uint64_t> AtfieldFunctionOrdinals;
+  bool AtfieldHasProductMetadata = false;
   /// Deterministic module-local ordinals for emitted global provenance records.
   DenseMap<const GlobalVariable *, uint64_t> AtfieldGlobalOrdinals;
   uint64_t AtfieldNextGlobalOrdinal = 0;

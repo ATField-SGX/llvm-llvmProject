@@ -588,6 +588,8 @@ void AsmPrinter::getAnalysisUsage(AnalysisUsage &AU) const {
 bool AsmPrinter::doInitialization(Module &M) {
   if (AtfieldAnchorPreparation) {
     AtfieldNextUnitOrdinal = 0;
+    AtfieldFunctionOrdinals.clear();
+    AtfieldHasProductMetadata = false;
     const Triple &AtfieldTarget = TM.getTargetTriple();
     if (!AtfieldTarget.isOSBinFormatELF() ||
         AtfieldTarget.getArch() != Triple::x86_64) {
@@ -598,6 +600,7 @@ bool AsmPrinter::doInitialization(Module &M) {
     bool Valid = true;
     SmallSet<uint64_t, 32> SeenOrdinals;
     uint64_t ExpectedOrdinal = 0;
+    uint64_t DefinitionOrdinal = 0;
     for (const Function &F : M) {
       Attribute Attr = F.getFnAttribute("atfield-function-ordinal");
       if (F.isDeclaration()) {
@@ -608,6 +611,10 @@ bool AsmPrinter::doInitialization(Module &M) {
         }
         continue;
       }
+      AtfieldFunctionOrdinals[&F] = DefinitionOrdinal++;
+      if (!Attr.isStringAttribute())
+        continue;
+      AtfieldHasProductMetadata = true;
       uint64_t Ordinal = 0;
       if (!readAtfieldFunctionOrdinal(F, Ordinal) ||
           Ordinal != ExpectedOrdinal ||
@@ -968,7 +975,7 @@ void AsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
 
   // Determine to which section this global should be emitted.
   MCSection *TheSection = getObjFileLowering().SectionForGlobal(GV, GVKind, TM);
-  if (AtfieldAnchorPreparation && TM.getDataSections() &&
+  if (AtfieldAnchorPreparation && AtfieldHasProductMetadata && TM.getDataSections() &&
       GV->hasLocalLinkage() &&
       !GV->hasComdat() && !GV->hasAppendingLinkage() &&
       !GV->isThreadLocal() && !GV->isExternallyInitialized() &&
@@ -1269,8 +1276,10 @@ void AsmPrinter::emitFunctionHeader() {
   if (AtfieldAnchorPreparation)
     AtfieldPatchableOpPending = false;
   if (AtfieldAnchorPreparation)
-    OutStreamer->emitAtfieldFunctionBegin(AtfieldPayloadOrdinal,
-                                          atfieldFunctionOrdinal(F));
+    OutStreamer->emitAtfieldFunctionBegin(AtfieldHasProductMetadata
+                                              ? AtfieldPayloadOrdinal
+                                              : 0,
+                                          AtfieldFunctionOrdinals.lookup(&F));
   if (AtfieldAnchorPreparation && F.hasPrologueData())
     OutStreamer->emitAtfieldUnitBegin(false, AtfieldNextUnitOrdinal++, 1,
                                       false);
