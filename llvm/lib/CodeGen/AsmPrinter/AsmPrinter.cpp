@@ -1276,10 +1276,8 @@ void AsmPrinter::emitFunctionHeader() {
   if (AtfieldAnchorPreparation)
     AtfieldPatchableOpPending = false;
   if (AtfieldAnchorPreparation)
-    OutStreamer->emitAtfieldFunctionBegin(AtfieldHasProductMetadata
-                                              ? AtfieldPayloadOrdinal
-                                              : 0,
-                                          AtfieldFunctionOrdinals.lookup(&F));
+    OutStreamer->emitAtfieldFunctionBegin(
+        AtfieldPayloadOrdinal, AtfieldFunctionOrdinals.lookup(&F));
   if (AtfieldAnchorPreparation && F.hasPrologueData())
     OutStreamer->emitAtfieldUnitBegin(false, AtfieldNextUnitOrdinal++, 1,
                                       false);
