@@ -32,10 +32,10 @@ struct FixedNumOperandTraits {
     static_assert(
         !std::is_polymorphic<SubClass>::value,
         "adding virtual methods to subclasses of User breaks use lists");
-    return reinterpret_cast<Use*>(U) - ARITY;
+    return U->getOperandList();
   }
   static Use *op_end(SubClass* U) {
-    return reinterpret_cast<Use*>(U);
+    return U->getOperandList() + ARITY;
   }
   static unsigned operands(const User*) {
     return ARITY;
@@ -69,10 +69,10 @@ template <typename SubClass> struct VariadicOperandTraits {
     static_assert(
         !std::is_polymorphic<SubClass>::value,
         "adding virtual methods to subclasses of User breaks use lists");
-    return reinterpret_cast<Use*>(U) - static_cast<User*>(U)->getNumOperands();
+    return U->getOperandList();
   }
   static Use *op_end(SubClass* U) {
-    return reinterpret_cast<Use*>(U);
+    return U->getOperandList() + U->getNumOperands();
   }
   static unsigned operands(const User *U) {
     return U->getNumOperands();
@@ -137,12 +137,18 @@ VALUECLASS *CLASS::getOperand(unsigned i_nocapture) const { \
   assert(i_nocapture < OperandTraits<CLASS>::operands(this) \
          && "getOperand() out of range!"); \
   return cast_or_null<VALUECLASS>( \
-    OperandTraits<CLASS>::op_begin(const_cast<CLASS*>(this))[i_nocapture].get()); \
+    reinterpret_cast<Use *>(reinterpret_cast<char *>( \
+      OperandTraits<CLASS>::op_begin(const_cast<CLASS *>(this))) + \
+      static_cast<std::ptrdiff_t>(i_nocapture) * \
+        static_cast<std::ptrdiff_t>(sizeof(Use)))->get()); \
 } \
 void CLASS::setOperand(unsigned i_nocapture, VALUECLASS *Val_nocapture) { \
   assert(i_nocapture < OperandTraits<CLASS>::operands(this) \
          && "setOperand() out of range!"); \
-  OperandTraits<CLASS>::op_begin(this)[i_nocapture] = Val_nocapture; \
+  *reinterpret_cast<Use *>(reinterpret_cast<char *>( \
+    OperandTraits<CLASS>::op_begin(this)) + \
+    static_cast<std::ptrdiff_t>(i_nocapture) * \
+      static_cast<std::ptrdiff_t>(sizeof(Use))) = Val_nocapture; \
 } \
 unsigned CLASS::getNumOperands() const { \
   return OperandTraits<CLASS>::operands(this); \

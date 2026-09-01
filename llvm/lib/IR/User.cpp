@@ -109,7 +109,9 @@ MutableArrayRef<uint8_t> User::getDescriptor() {
   assert(HasDescriptor && "Don't call otherwise!");
   assert(!HasHungOffUses && "Invariant!");
 
-  auto *DI = reinterpret_cast<DescriptorInfo *>(getIntrusiveOperands()) - 1;
+  auto *DI = reinterpret_cast<DescriptorInfo *>(
+      reinterpret_cast<char *>(getIntrusiveOperands()) -
+      static_cast<std::ptrdiff_t>(sizeof(DescriptorInfo)));
   assert(DI->SizeInBytes != 0 && "Should not have had a descriptor otherwise!");
 
   return MutableArrayRef<uint8_t>(
@@ -154,13 +156,19 @@ void *User::allocateFixedOperandUser(size_t Size, unsigned Us,
 
   uint8_t *Storage = static_cast<uint8_t *>(::operator new(LeadingSize + Size));
   User *Obj = reinterpret_cast<User *>(Storage + LeadingSize);
-  Use *Operands = reinterpret_cast<Use *>(Obj) - Us;
+  Use *Operands = reinterpret_cast<Use *>(
+      reinterpret_cast<char *>(Obj) -
+      static_cast<std::ptrdiff_t>(Us) *
+          static_cast<std::ptrdiff_t>(sizeof(Use)));
+  Obj->OperandList = Operands;
   Obj->NumUserOperands = Us;
   Obj->HasHungOffUses = false;
   Obj->HasDescriptor = DescBytes != 0;
 
   if (DescBytes != 0) {
-    auto *DescInfo = reinterpret_cast<DescriptorInfo *>(Operands) - 1;
+    auto *DescInfo = reinterpret_cast<DescriptorInfo *>(
+        reinterpret_cast<char *>(Operands) -
+        static_cast<std::ptrdiff_t>(sizeof(DescriptorInfo)));
     DescInfo->SizeInBytes = DescBytes;
   }
 
@@ -200,25 +208,35 @@ User::~User() {
   if (HasHungOffUses) {
     assert(!HasDescriptor && "not supported!");
 
-    Use **HungOffOperandList = reinterpret_cast<Use **>(this) - 1;
     // drop the hung off uses.
-    Use::zap(*HungOffOperandList, *HungOffOperandList + NumUserOperands,
+    Use::zap(OperandList, OperandList + NumUserOperands,
              /* Delete */ true);
-    AllocStart = HungOffOperandList;
+    AllocStart = reinterpret_cast<char *>(this) - sizeof(Use *);
   } else if (HasDescriptor) {
-    Use *UseBegin = reinterpret_cast<Use *>(this) - NumUserOperands;
+    Use *UseBegin = reinterpret_cast<Use *>(
+        reinterpret_cast<char *>(this) -
+        static_cast<std::ptrdiff_t>(NumUserOperands) *
+            static_cast<std::ptrdiff_t>(sizeof(Use)));
     Use::zap(UseBegin, UseBegin + NumUserOperands, /* Delete */ false);
 
-    auto *DI = reinterpret_cast<DescriptorInfo *>(UseBegin) - 1;
-    AllocStart = reinterpret_cast<uint8_t *>(DI) - DI->SizeInBytes;
+    auto *DI = reinterpret_cast<DescriptorInfo *>(
+        reinterpret_cast<char *>(UseBegin) -
+        static_cast<std::ptrdiff_t>(sizeof(DescriptorInfo)));
+    AllocStart = reinterpret_cast<uint8_t *>(
+        reinterpret_cast<char *>(DI) -
+        static_cast<std::ptrdiff_t>(DI->SizeInBytes));
   } else if (NumUserOperands > 0) {
-    Use *Storage = reinterpret_cast<Use *>(this) - NumUserOperands;
+    Use *Storage = reinterpret_cast<Use *>(
+        reinterpret_cast<char *>(this) -
+        static_cast<std::ptrdiff_t>(NumUserOperands) *
+            static_cast<std::ptrdiff_t>(sizeof(Use)));
     Use::zap(Storage, Storage + NumUserOperands,
              /* Delete */ false);
     AllocStart = Storage;
   } else {
     // Handle the edge case where there are no operands and no descriptor.
-    AllocStart = (void **)(this) - 1;
+    AllocStart = reinterpret_cast<char *>(this) -
+                 static_cast<std::ptrdiff_t>(sizeof(void *));
   }
 
   // Operator delete needs to know where the allocation started. To avoid
@@ -228,22 +246,36 @@ User::~User() {
   // special case, we avoid this extra prefix allocation for ConstantData
   // instances, since those are extremely common.
   if (!isa<ConstantData>(this))
-    ((void **)this)[-1] = AllocStart;
+    *reinterpret_cast<void **>(
+        reinterpret_cast<char *>(this) -
+        static_cast<std::ptrdiff_t>(sizeof(void *))) = AllocStart;
 }
 
-void User::operator delete(void *Usr) { ::operator delete(((void **)Usr)[-1]); }
+void User::operator delete(void *Usr) {
+  ::operator delete(*reinterpret_cast<void **>(
+      static_cast<char *>(Usr) -
+      static_cast<std::ptrdiff_t>(sizeof(void *))));
+}
 
 void User::operator delete(void *Usr, HungOffOperandsAllocMarker) {
-  Use **HungOffOperandList = static_cast<Use **>(Usr) - 1;
+  Use **HungOffOperandList = reinterpret_cast<Use **>(
+      static_cast<char *>(Usr) -
+      static_cast<std::ptrdiff_t>(sizeof(Use *)));
   ::operator delete(HungOffOperandList);
 }
 
 void User::operator delete(void *Usr,
                            IntrusiveOperandsAndDescriptorAllocMarker Marker) {
   unsigned NumOps = Marker.NumOps;
-  Use *UseBegin = static_cast<Use *>(Usr) - NumOps;
-  auto *DI = reinterpret_cast<DescriptorInfo *>(UseBegin) - 1;
-  uint8_t *Storage = reinterpret_cast<uint8_t *>(DI) - DI->SizeInBytes;
+  Use *UseBegin = reinterpret_cast<Use *>(
+      static_cast<char *>(Usr) - static_cast<std::ptrdiff_t>(NumOps) *
+                                    static_cast<std::ptrdiff_t>(sizeof(Use)));
+  auto *DI = reinterpret_cast<DescriptorInfo *>(
+      reinterpret_cast<char *>(UseBegin) -
+      static_cast<std::ptrdiff_t>(sizeof(DescriptorInfo)));
+  uint8_t *Storage = reinterpret_cast<uint8_t *>(
+      reinterpret_cast<char *>(DI) -
+      static_cast<std::ptrdiff_t>(DI->SizeInBytes));
   ::operator delete(Storage);
 }
 

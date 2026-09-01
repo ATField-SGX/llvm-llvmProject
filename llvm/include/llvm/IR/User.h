@@ -124,14 +124,13 @@ protected:
            "Cannot have both hung off uses and a descriptor");
     HasHungOffUses = AllocInfo.HasHungOffUses;
     HasDescriptor = AllocInfo.HasDescriptor;
-    // If we have hung off uses, then the operand list should initially be
-    // null.
-    assert((!AllocInfo.HasHungOffUses || !getOperandList()) &&
-           "Error in initializing hung off uses for User");
-
-    Use *Operands = reinterpret_cast<Use *>(this) - NumUserOperands;
+    OperandList = AllocInfo.HasHungOffUses
+                      ? nullptr
+                      : reinterpret_cast<Use *>(
+                            reinterpret_cast<char *>(this) -
+                            NumUserOperands * sizeof(Use));
     for (unsigned I = 0; I < NumUserOperands; ++I)
-      new (&Operands[I]) Use(this);
+      new (&OperandList[I]) Use(this);
   }
 
   /// Allocate the array of Uses, followed by a pointer
@@ -163,9 +162,12 @@ public:
 
 protected:
   template <int Idx, typename U> static Use &OpFrom(const U *that) {
-    return Idx < 0
-      ? OperandTraits<U>::op_end(const_cast<U*>(that))[Idx]
-      : OperandTraits<U>::op_begin(const_cast<U*>(that))[Idx];
+    auto *Obj = const_cast<U *>(that);
+    unsigned Index = Idx < 0
+                         ? OperandTraits<U>::operands(Obj) -
+                               static_cast<unsigned>(-Idx)
+                         : static_cast<unsigned>(Idx);
+    return OperandTraits<U>::op_begin(Obj)[Index];
   }
 
   template <int Idx> Use &Op() {
@@ -177,18 +179,14 @@ protected:
 
 private:
   const Use *getHungOffOperands() const {
-    return *(reinterpret_cast<const Use *const *>(this) - 1);
+    return OperandList;
   }
 
-  Use *&getHungOffOperands() { return *(reinterpret_cast<Use **>(this) - 1); }
+  Use *&getHungOffOperands() { return OperandList; }
 
-  const Use *getIntrusiveOperands() const {
-    return reinterpret_cast<const Use *>(this) - NumUserOperands;
-  }
+  const Use *getIntrusiveOperands() const { return OperandList; }
 
-  Use *getIntrusiveOperands() {
-    return reinterpret_cast<Use *>(this) - NumUserOperands;
-  }
+  Use *getIntrusiveOperands() { return OperandList; }
 
   void setOperandList(Use *NewList) {
     assert(HasHungOffUses &&
@@ -198,7 +196,7 @@ private:
 
 public:
   const Use *getOperandList() const {
-    return HasHungOffUses ? getHungOffOperands() : getIntrusiveOperands();
+    return OperandList;
   }
   Use *getOperandList() {
     return const_cast<Use *>(static_cast<const User *>(this)->getOperandList());
@@ -259,10 +257,10 @@ public:
   op_iterator       op_begin()       { return getOperandList(); }
   const_op_iterator op_begin() const { return getOperandList(); }
   op_iterator       op_end()         {
-    return getOperandList() + NumUserOperands;
+    return OperandList + NumUserOperands;
   }
   const_op_iterator op_end()   const {
-    return getOperandList() + NumUserOperands;
+    return OperandList + NumUserOperands;
   }
   op_range operands() {
     return op_range(op_begin(), op_end());
@@ -336,6 +334,9 @@ public:
   static bool classof(const Value *V) {
     return isa<Instruction>(V) || isa<Constant>(V);
   }
+
+private:
+  Use *OperandList = nullptr;
 };
 
 // Either Use objects, or a Use pointer can be prepended to User.
