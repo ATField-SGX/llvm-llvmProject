@@ -57,7 +57,7 @@ public:
   std::atomic<bool> Initialized;
 
   constexpr TrackingStatistic(const char *DebugType, const char *Name,
-                              const char *Desc)
+                              const char *Desc) noexcept
       : DebugType(DebugType), Name(Name), Desc(Desc), Value(0),
         Initialized(false) {}
 
