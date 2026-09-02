@@ -132,7 +132,7 @@ protected:
 class NoopStatistic {
 public:
   constexpr NoopStatistic(const char * /*DebugType*/, const char * /*Name*/,
-                          const char * /*Desc*/) {}
+                          const char * /*Desc*/) noexcept {}
 
   uint64_t getValue() const { return 0; }
 
